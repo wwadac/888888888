@@ -4,25 +4,18 @@ import sqlite3
 import time
 from datetime import datetime
 from telethon import TelegramClient, events, Button
-from telethon.sessions import StringSession
-import re
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class TelegramParserBot:
+class TelegramBotParser:
     def __init__(self):
-        # Бот для управления
-        self.BOT_TOKEN = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'
-        
-        # User-аккаунт для парсинга (нужно получить session string)
         self.API_ID = '29385016'
         self.API_HASH = '3c57df8805ab5de5a23a032ed39b9af9'
-        self.USER_SESSION = None  # Нужно установить через /auth
+        self.BOT_TOKEN = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'
         
         self.bot_client = None
-        self.user_client = None
         self.setup_database()
     
     def setup_database(self):
@@ -35,13 +28,6 @@ class TelegramParserBot:
                 user_id INTEGER PRIMARY KEY,
                 request_count INTEGER DEFAULT 0,
                 last_reset_time REAL
-            )
-        ''')
-        
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_sessions (
-                user_id INTEGER PRIMARY KEY,
-                session_string TEXT
             )
         ''')
         self.conn.commit()
@@ -118,43 +104,7 @@ class TelegramParserBot:
             }
         return {'used': 0, 'remaining': 5, 'remaining_time': 0}
     
-    async def get_user_session(self, user_id):
-        """Получает session string пользователя"""
-        self.cursor.execute(
-            'SELECT session_string FROM user_sessions WHERE user_id = ?',
-            (user_id,)
-        )
-        result = self.cursor.fetchone()
-        return result[0] if result else None
-    
-    async def save_user_session(self, user_id, session_string):
-        """Сохраняет session string пользователя"""
-        self.cursor.execute(
-            'INSERT OR REPLACE INTO user_sessions (user_id, session_string) VALUES (?, ?)',
-            (user_id, session_string)
-        )
-        self.conn.commit()
-    
-    async def initialize_user_client(self, user_id):
-        """Инициализирует user-клиент для парсинга"""
-        try:
-            session_string = await self.get_user_session(user_id)
-            if not session_string:
-                return None, "❌ Сначала выполните авторизацию через /auth"
-            
-            self.user_client = TelegramClient(
-                StringSession(session_string), 
-                self.API_ID, 
-                self.API_HASH
-            )
-            
-            await self.user_client.start()
-            return self.user_client, "✅ User-клиент авторизован"
-            
-        except Exception as e:
-            return None, f"❌ Ошибка авторизации: {str(e)}"
-    
-    async def initialize_bot(self):
+    async def initialize(self):
         """Инициализация бота"""
         self.bot_client = TelegramClient(
             'bot_session', 
@@ -175,59 +125,38 @@ class TelegramParserBot:
             stats = await self.get_user_stats(user_id)
             
             welcome_text = f"""
-🤖 Telegram Parser Bot
+🤖 Telegram Participant Parser Bot
 
 У вас {stats['remaining']}/5 запросов на парсинг
 
-🔐 Требуется авторизация:
-1. Используйте /auth для получения инструкций
-2. После авторизации используйте /parse
+📋 Бот собирает участников из публичных чатов
+• Сохраняет 1-50 пользователей
+• Только публичные чаты
+• Username, ID, имена
 
-Бот соберет 1-50 пользователей из чата
+Отправьте ссылку на публичный чат для анализа
             """
             
             buttons = [
-                [Button.inline("🔐 Авторизация", b"show_auth")],
-                [Button.inline("🔍 Парсинг", b"start_parsing")],
-                [Button.inline("📊 Статистика", b"show_stats")]
+                [Button.inline("🔍 Начать парсинг", b"start_parsing")],
+                [Button.inline("📊 Моя статистика", b"show_stats")],
+                [Button.inline("ℹ️ Помощь", b"show_help")]
             ]
             
             await event.reply(welcome_text, buttons=buttons)
         
-        @self.bot_client.on(events.NewMessage(pattern='/auth'))
-        async def auth_handler(event):
-            auth_instructions = """
-🔐 **Авторизация User-аккаунта**
-
-Для парсинга чатов нужен user-аккаунт:
-
-1. Перейдите на @genStr_robot
-2. Получите session string
-3. Отправьте его мне в формате:
-   `1a2b3c4d...` (длинная строка)
-
-После авторизации можно парсить чаты!
-            """
-            await event.reply(auth_instructions)
-        
         @self.bot_client.on(events.NewMessage(pattern='/parse'))
         async def parse_handler(event):
             user_id = event.sender_id
-            
-            # Проверяем авторизацию
-            session_string = await self.get_user_session(user_id)
-            if not session_string:
-                await event.reply("❌ Сначала выполните авторизацию через /auth")
-                return
-            
             stats = await self.get_user_stats(user_id)
+            
             if stats['remaining'] <= 0:
                 minutes_left = int(stats['remaining_time'] // 60)
                 await event.reply(f"❌ Лимит исчерпан! Подождите {minutes_left} минут")
                 return
             
             parse_instructions = """
-🔍 **Парсинг пользователей из чата**
+🔍 **Парсинг участников чата**
 
 Отправьте ссылку на публичный чат:
 - @username  
@@ -245,45 +174,63 @@ class TelegramParserBot:
             minutes_left = int(stats['remaining_time'] // 60)
             seconds_left = int(stats['remaining_time'] % 60)
             
-            # Проверяем авторизацию
-            session_string = await self.get_user_session(user_id)
-            auth_status = "✅ Авторизован" if session_string else "❌ Не авторизован"
-            
             stats_text = f"""
 📊 Статистика:
 
-{auth_status}
 ✅ Использовано: {stats['used']}/5
 🔄 Осталось: {stats['remaining']}
 ⏰ Сброс через: {minutes_left}мин {seconds_left}сек
             """
             await event.reply(stats_text)
         
+        @self.bot_client.on(events.NewMessage(pattern='/help'))
+        async def help_handler(event):
+            help_text = """
+📖 **Помощь по использованию парсера**
+
+1. Отправьте ссылку на публичный чат
+2. Бот соберет участников (1-50 человек)
+3. Результат сохранится в TXT файл
+
+📝 **Примеры ссылок:**
+@telegram
+https://t.me/telegram
+
+⚠️ **Ограничения:**
+- 5 запросов в 40 минут
+- Только публичные чаты
+- Бот должен быть участником чата
+            """
+            await event.reply(help_text)
+        
         @self.bot_client.on(events.CallbackQuery)
         async def callback_handler(event):
             user_id = event.sender_id
             data = event.data.decode('utf-8')
             
-            if data == "show_auth":
-                await auth_handler(event)
-            
-            elif data == "start_parsing":
-                session_string = await self.get_user_session(user_id)
-                if not session_string:
-                    await event.answer("❌ Сначала выполните авторизацию!", alert=True)
-                    return
-                
+            if data == "start_parsing":
                 stats = await self.get_user_stats(user_id)
                 if stats['remaining'] <= 0:
                     minutes_left = int(stats['remaining_time'] // 60)
                     await event.answer(f"❌ Лимит исчерпан! Ждите {minutes_left} мин", alert=True)
                     return
                 
-                parse_text = "🔍 Отправьте ссылку на публичный чат (например: @telegram)"
+                parse_text = """
+🔍 Отправьте ссылку на публичный чат:
+
+Примеры:
+@telegram
+https://t.me/telegram
+
+Бот должен быть участником чата!
+                """
                 await event.edit(parse_text)
             
             elif data == "show_stats":
                 await stats_handler(event)
+            
+            elif data == "show_help":
+                await help_handler(event)
         
         @self.bot_client.on(events.NewMessage)
         async def message_handler(event):
@@ -293,47 +240,19 @@ class TelegramParserBot:
             if text.startswith('/'):
                 return
             
-            # Проверяем session string (длинная строка)
-            if len(text) > 100 and all(c.isalnum() or c in '+-=' for c in text):
-                await self.process_session_string(event, text, user_id)
-                return
-            
             # Проверяем ссылку на чат
             if self.is_chat_link(text):
                 await self.process_chat_parsing(event, text, user_id)
             else:
-                await event.reply("❌ Не распознано. Отправьте ссылку на чат или session string")
+                await event.reply("❌ Это не похоже на ссылку чата. Используйте @username или https://t.me/username")
     
     def is_chat_link(self, text):
         """Проверяет, является ли текст ссылкой на чат"""
         return text.startswith('@') or text.startswith('https://t.me/')
     
-    async def process_session_string(self, event, session_string, user_id):
-        """Обрабатывает сохранение session string"""
-        try:
-            await self.save_user_session(user_id, session_string)
-            
-            # Проверяем валидность сессии
-            user_client, message = await self.initialize_user_client(user_id)
-            if user_client:
-                me = await user_client.get_me()
-                await event.reply(f"✅ Авторизация успешна!\nАккаунт: {me.first_name}\nТеперь можно использовать /parse")
-            else:
-                await event.reply(message)
-                
-        except Exception as e:
-            await event.reply(f"❌ Ошибка при сохранении session: {str(e)}")
-    
     async def process_chat_parsing(self, event, chat_link, user_id):
         """Обрабатывает парсинг чата"""
         try:
-            # Проверяем авторизацию
-            user_client, auth_message = await self.initialize_user_client(user_id)
-            if not user_client:
-                await event.reply(auth_message)
-                return
-            
-            # Проверяем лимиты
             stats = await self.get_user_stats(user_id)
             if stats['remaining'] <= 0:
                 minutes_left = int(stats['remaining_time'] // 60)
@@ -351,22 +270,36 @@ class TelegramParserBot:
             
             try:
                 # Получаем информацию о чате
-                chat = await user_client.get_entity(chat_username)
+                chat = await self.bot_client.get_entity(chat_username)
                 await message.edit("✅ Чат найден! Собираю участников...")
                 
                 # Собираем участников (до 50)
                 participants = []
-                async for user in user_client.iter_participants(chat, limit=50):
-                    participants.append({
-                        'id': user.id,
-                        'username': user.username or 'Нет username',
-                        'first_name': user.first_name or '',
-                        'last_name': user.last_name or '',
-                        'is_bot': user.bot
-                    })
+                count = 0
+                
+                try:
+                    async for user in self.bot_client.iter_participants(chat, limit=50):
+                        if count >= 50:
+                            break
+                            
+                        participants.append({
+                            'id': user.id,
+                            'username': user.username or 'Нет username',
+                            'first_name': user.first_name or '',
+                            'last_name': user.last_name or '',
+                            'is_bot': user.bot
+                        })
+                        count += 1
+                        
+                        # Обновляем прогресс каждые 10 пользователей
+                        if count % 10 == 0:
+                            await message.edit(f"✅ Собрано {count} пользователей...")
+                    
+                except Exception as e:
+                    await message.edit(f"⚠️ Не удалось собрать всех участников: {str(e)}")
                 
                 if not participants:
-                    await message.edit("❌ Не удалось собрать участников")
+                    await message.edit("❌ Не удалось собрать участников. Бот должен быть участником чата!")
                     return
                 
                 await message.edit(f"✅ Собрано {len(participants)} пользователей! Сохраняю...")
@@ -399,6 +332,8 @@ class TelegramParserBot:
 • Чат: {chat_username}
 • Участников собрано: {len(participants)}
 • Файл: {filename}
+
+💾 Файл содержит список участников чата
                 """
                 
                 await self.bot_client.send_file(
@@ -413,7 +348,15 @@ class TelegramParserBot:
                 await event.reply(f"🔄 Осталось запросов: {stats['remaining']}/5")
                 
             except Exception as e:
-                await message.edit(f"❌ Ошибка при парсинге: {str(e)}")
+                error_msg = str(e)
+                if "No user has" in error_msg or "Could not find" in error_msg:
+                    await message.edit("❌ Чат не найден или бот не является участником!")
+                elif "USERNAME_INVALID" in error_msg:
+                    await message.edit("❌ Неверный username или чат не существует!")
+                elif "A wait of" in error_msg:
+                    await message.edit("❌ Слишком много запросов! Подождите немного.")
+                else:
+                    await message.edit(f"❌ Ошибка: {error_msg}")
                 logger.error(f"Error parsing chat: {e}")
                 
         except Exception as e:
@@ -422,13 +365,13 @@ class TelegramParserBot:
     
     async def run(self):
         """Запуск бота"""
-        await self.initialize_bot()
+        await self.initialize()
         logger.info("Бот запущен и готов к работе")
         await self.bot_client.run_until_disconnected()
 
 # Запуск бота
 if __name__ == '__main__':
-    bot = TelegramParserBot()
+    bot = TelegramBotParser()
     
     try:
         asyncio.run(bot.run())
