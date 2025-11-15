@@ -1,194 +1,98 @@
-import telebot
-import pandas as pd
-import re
-import os
-import time
-from io import BytesIO
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.jobstores.memory import MemoryJobStore
+# bot_pythonanywhere.py
+import asyncio
+import logging
+from telethon import TelegramClient, events
 
-# === НАСТРОЙКИ ===
-TOKEN = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'
-ADMIN_USER_ID = 8000395560  # Замените на ваш ID (узнать через @userinfobot)
+# Настройка для PythonAnywhere
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-bot = telebot.TeleBot(TOKEN)
-scheduler = BackgroundScheduler(jobstores={'default': MemoryJobStore()})
-scheduler.start()
+class TelegramCheckerBot:
+    def __init__(self):
+        self.API_ID = '29385016'
+        self.API_HASH = '3c57df8805ab5de5a23a032ed39b9af9'
+        self.BOT_TOKEN = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'
 
-# Глобальные настройки
-config = {
-    'target_chat_id': None,      # Куда слать @username
-    'interval_sec': 300,         # По умолчанию — каждые 5 минут
-    'usernames': [],             # Список @username из файла
-    'current_index': 0,          # Текущая позиция в списке
-    'is_active': False           # Работает ли рассылка
-}
+        self.user_client = None
+        self.bot_client = None
 
-job_id = 'send_users_job'
+    async def initialize(self):
+        """Инициализация клиентов"""
+        self.user_client = TelegramClient('session_user', self.API_ID, self.API_HASH)
+        self.bot_client = TelegramClient('session_bot', self.API_ID, self.API_HASH)
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+        await self.user_client.start()
+        await self.bot_client.start(bot_token=self.BOT_TOKEN)
 
-def send_next_user():
-    if not config['is_active'] or not config['usernames']:
-        return
-    if config['current_index'] >= len(config['usernames']):
-        bot.send_message(ADMIN_USER_ID, "✅ Рассылка завершена!")
-        config['is_active'] = False
-        if scheduler.get_job(job_id):
-            scheduler.remove_job(job_id)
-        return
+        self.setup_handlers()
+        logger.info("Бот инициализирован")
 
-    username = config['usernames'][config['current_index']]
-    try:
-        bot.send_message(config['target_chat_id'], username)
-        config['current_index'] += 1
-    except Exception as e:
-        bot.send_message(ADMIN_USER_ID, f"❌ Ошибка отправки в чат: {e}")
-        config['is_active'] = False
-        if scheduler.get_job(job_id):
-            scheduler.remove_job(job_id)
+    def setup_handlers(self):
+        """Настройка обработчиков событий"""
 
-# === АДМИН-КОМАНДЫ ===
+        @self.bot_client.on(events.NewMessage(pattern='/start'))
+        async def start_handler(event):
+            await event.reply("🤖 Бот запущен! Отправь мне username для проверки.")
 
-@bot.message_handler(commands=['start', 'help'])
-def cmd_help(message):
-    if message.from_user.id != ADMIN_USER_ID:
-        bot.reply_to(message, "❌ Доступ запрещён.")
-        return
-    help_text = """
-🤖 **Админ-панель рассылки**:
+        @self.bot_client.on(events.NewMessage(pattern='/check'))
+        async def check_handler(event):
+            try:
+                text = event.text.split()
+                if len(text) < 2:
+                    await event.reply("Укажите username: /check @username")
+                    return
 
-`/setchat <ID>` — установить ID чата/группы
-`/interval <сек>` — интервал между отправками (например, 300 = 5 мин)
-`/status` — показать текущие настройки
-`/startsend` — запустить рассылку
-`/stopsend` — остановить рассылку
+                username = text[1].replace('@', '')
+                result = await self.check_user_exists(username)
 
-📎 Просто отправьте Excel-файл (.xlsx), и бот извлечёт @username.
-"""
-    bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
+                if result['exists']:
+                    response = f"✅ @{username} существует\nID: {result['id']}"
+                else:
+                    response = f"❌ @{username} не существует"
 
-@bot.message_handler(commands=['setchat'])
-def cmd_set_chat(message):
-    if message.from_user.id != ADMIN_USER_ID:
-        return
-    try:
-        chat_id = int(message.text.split()[1])
-        config['target_chat_id'] = chat_id
-        bot.reply_to(message, f"✅ Целевой чат установлен: `{chat_id}`", parse_mode='Markdown')
-    except (IndexError, ValueError):
-        bot.reply_to(message, "❌ Укажите корректный ID чата: `/setchat -1001234567890`", parse_mode='Markdown')
+                await event.reply(response)
 
-@bot.message_handler(commands=['interval'])
-def cmd_set_interval(message):
-    if message.from_user.id != ADMIN_USER_ID:
-        return
-    try:
-        sec = int(message.text.split()[1])
-        if sec < 10:
-            bot.reply_to(message, "⚠️ Минимальный интервал — 10 секунд.")
-            return
-        config['interval_sec'] = sec
-        bot.reply_to(message, f"✅ Интервал установлен: {sec} секунд")
-    except (IndexError, ValueError):
-        bot.reply_to(message, "❌ Используйте: `/interval 300`", parse_mode='Markdown')
+            except Exception as e:
+                await event.reply(f"❌ Ошибка: {e}")
 
-@bot.message_handler(commands=['status'])
-def cmd_status(message):
-    if message.from_user.id != ADMIN_USER_ID:
-        return
-    status = f"""
-📊 **Статус**:
-- Целевой чат: `{config['target_chat_id'] or 'не задан'}`
-- Всего пользователей: {len(config['usernames'])}
-- Отправлено: {config['current_index']}
-- Интервал: {config['interval_sec']} сек
-- Состояние: {'🟢 активна' if config['is_active'] else '🔴 остановлена'}
-"""
-    bot.send_message(message.chat.id, status, parse_mode='Markdown')
+        @self.bot_client.on(events.NewMessage)
+        async def message_handler(event):
+            text = event.text.strip()
+            if text.startswith('/'):
+                return
 
-@bot.message_handler(commands=['startsend'])
-def cmd_start_send(message):
-    if message.from_user.id != ADMIN_USER_ID:
-        return
-    if not config['target_chat_id']:
-        bot.reply_to(message, "❌ Сначала установите чат: `/setchat <ID>`")
-        return
-    if not config['usernames']:
-        bot.reply_to(message, "❌ Сначала загрузите Excel-файл с @username")
-        return
-    if config['current_index'] >= len(config['usernames']):
-        bot.reply_to(message, "ℹ️ Все пользователи уже отправлены. Загрузите новый файл.")
-        return
+            if len(text) <= 32 and not ' ' in text:
+                username = text.replace('@', '')
+                result = await self.check_user_exists(username)
 
-    config['is_active'] = True
-    # Удаляем старую задачу, если есть
-    if scheduler.get_job(job_id):
-        scheduler.remove_job(job_id)
-    scheduler.add_job(send_next_user, 'interval', seconds=config['interval_sec'], id=job_id)
-    bot.reply_to(message, f"✅ Рассылка запущена! Первый юзер отправится через {config['interval_sec']} сек.")
+                if result['exists']:
+                    response = f"✅ @{username} существует\nID: {result['id']}"
+                else:
+                    response = f"❌ @{username} не существует"
 
-@bot.message_handler(commands=['stopsend'])
-def cmd_stop_send(message):
-    if message.from_user.id != ADMIN_USER_ID:
-        return
-    config['is_active'] = False
-    if scheduler.get_job(job_id):
-        scheduler.remove_job(job_id)
-    bot.reply_to(message, "⏹️ Рассылка остановлена.")
+                await event.reply(response)
 
-# === ЗАГРУЗКА ФАЙЛА ===
+    async def check_user_exists(self, username):
+        """Проверка существования пользователя"""
+        try:
+            user = await self.user_client.get_entity(username)
+            return {
+                'exists': True,
+                'id': user.id,
+                'first_name': user.first_name
+            }
+        except Exception:
+            return {'exists': False}
 
-@bot.message_handler(content_types=['document'])
-def handle_document(message):
-    if message.from_user.id != ADMIN_USER_ID:
-        bot.reply_to(message, "❌ Только админ может загружать файлы.")
-        return
+    async def run(self):
+        """Запуск бота"""
+        await self.initialize()
+        logger.info("Бот запущен и готов к работе")
+        await self.bot_client.run_until_disconnected()
 
-    try:
-        if not message.document.file_name.endswith('.xlsx'):
-            bot.reply_to(message, "📁 Отправьте файл с расширением `.xlsx`")
-            return
+# Создаем и запускаем бота
+bot = TelegramCheckerBot()
 
-        file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-
-        excel_data = pd.read_excel(
-            BytesIO(downloaded_file),
-            header=None,
-            dtype=str,
-            engine='openpyxl'
-        )
-
-        first_col = excel_data.iloc[:, 0].dropna().astype(str).str.strip()
-        links = first_col[first_col.str.contains(r'https?://t\.me/', na=False)]
-
-        usernames = []
-        for link in links:
-            match = re.search(r'https?://t\.me/([a-zA-Z0-9_]+)', link)
-            if match:
-                usernames.append('@' + match.group(1))
-
-        if not usernames:
-            bot.reply_to(message, "⚠️ В файле не найдено корректных ссылок на Telegram.")
-            return
-
-        config['usernames'] = usernames
-        config['current_index'] = 0
-        config['is_active'] = False
-        if scheduler.get_job(job_id):
-            scheduler.remove_job(job_id)
-
-        bot.reply_to(message, f"✅ Загружено {len(usernames)} @username. Готово к рассылке!\n\nИспользуйте `/startsend` для запуска.")
-
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {str(e)}")
-
-# === ЗАПУСК ===
-
+# Для PythonAnywhere используем этот вызов
 if __name__ == '__main__':
-    print("✅ Бот запущен...")
-    try:
-        bot.polling(none_stop=True, timeout=60)
-    except KeyboardInterrupt:
-        scheduler.shutdown()
+    asyncio.run(bot.run())
