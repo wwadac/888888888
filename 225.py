@@ -1,14 +1,15 @@
 import asyncio
 import logging
 import sqlite3
+import time
+from datetime import datetime
 from telethon import TelegramClient, events, Button
-import re
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class TelegramParserBot:
+class TelegramMessageParserBot:
     def __init__(self):
         self.API_ID = '29385016'
         self.API_HASH = '3c57df8805ab5de5a23a032ed39b9af9'
@@ -138,14 +139,12 @@ class TelegramParserBot:
             stats = await self.get_user_stats(user_id)
             
             welcome_text = f"""
-🤖 Telegram Parser Bot
+🤖 Telegram Message Parser Bot
 
 У вас {stats['remaining']}/5 запросов на парсинг
 
-📋 Доступные команды:
-/parse - Начать парсинг чата
-/stats - Показать статистику
-/help - Помощь
+📋 Собираю пользователей, которые писали в чате за все время
+Сохраняю от 1 до 50 уникальных пользователей
 
 Отправьте ссылку на публичный чат для анализа
             """
@@ -186,39 +185,17 @@ class TelegramParserBot:
                 return
             
             parse_instructions = """
-🔍 **Парсинг пользователей из чата**
+🔍 **Парсинг пользователей из сообщений чата**
 
 Отправьте ссылку на публичный чат в формате:
 - @username
 - https://t.me/username
-- https://t.me/joinchat/xxxxx
 
-Бот соберет пользователей и сохранит в файл.
+Бот соберет пользователей, которые писали в чате за все время
+(сохранит от 1 до 50 уникальных пользователей)
             """
             
             await event.reply(parse_instructions)
-        
-        @self.bot_client.on(events.NewMessage(pattern='/help'))
-        async def help_handler(event):
-            help_text = """
-📖 **Помощь по использованию парсера**
-
-1. Используйте /parse для начала парсинга
-2. Отправьте ссылку на публичный чат
-3. Бот соберет пользователей (50-100 человек)
-4. Результат будет сохранен в TXT файл
-
-⚠️ **Ограничения:**
-- 5 запросов в сутки
-- Только публичные чаты
-- Минимальный размер чата: 50 участников
-
-📝 **Примеры ссылок:**
-@telegram
-https://t.me/telegram
-https://t.me/joinchat/AAAAAE0XQ0Q
-            """
-            await event.reply(help_text)
         
         @self.bot_client.on(events.CallbackQuery)
         async def callback_handler(event):
@@ -238,7 +215,8 @@ https://t.me/joinchat/AAAAAE0XQ0Q
 Примеры:
 @telegram
 https://t.me/telegram
-https://t.me/joinchat/AAAAAE0XQ0Q
+
+Бот найдет пользователей, которые писали в чате
                 """
                 await event.edit(parse_text)
             
@@ -257,23 +235,14 @@ https://t.me/joinchat/AAAAAE0XQ0Q
             if self.is_chat_link(text):
                 await self.process_chat_parsing(event, text, user_id)
             else:
-                await event.reply("❌ Это не похоже на ссылку чата. Используйте /help для справки")
+                await event.reply("❌ Это не похоже на ссылку чата. Используйте @username или https://t.me/username")
     
     def is_chat_link(self, text):
         """Проверяет, является ли текст ссылкой на чат"""
-        patterns = [
-            r'^@[a-zA-Z0-9_]{5,32}$',
-            r'^https://t\.me/[a-zA-Z0-9_]{5,32}$',
-            r'^https://t\.me/joinchat/[a-zA-Z0-9_-]+$'
-        ]
-        
-        for pattern in patterns:
-            if re.match(pattern, text):
-                return True
-        return False
+        return text.startswith('@') or text.startswith('https://t.me/')
     
     async def process_chat_parsing(self, event, chat_link, user_id):
-        """Обрабатывает парсинг чата"""
+        """Обрабатывает парсинг сообщений чата"""
         try:
             stats = await self.get_user_stats(user_id)
             if stats['remaining'] <= 0:
@@ -281,11 +250,9 @@ https://t.me/joinchat/AAAAAE0XQ0Q
                 await event.reply(f"❌ Лимит исчерпан! Подождите {minutes_left} минут")
                 return
             
-            # Извлекаем username или invite ссылку
+            # Извлекаем username
             if chat_link.startswith('@'):
                 chat_username = chat_link[1:]
-            elif 'joinchat/' in chat_link:
-                chat_username = chat_link
             else:
                 chat_username = chat_link.split('/')[-1]
             
@@ -296,39 +263,60 @@ https://t.me/joinchat/AAAAAE0XQ0Q
             
             try:
                 # Получаем информацию о чате
-                if 'joinchat/' in chat_username:
-                    chat = await self.bot_client.get_entity(chat_username)
-                else:
-                    chat = await self.bot_client.get_entity(chat_username)
+                chat = await self.bot_client.get_entity(chat_username)
+                await message.edit("✅ Чат найден! Сканирую сообщения...")
                 
-                await message.edit("✅ Чат найден! Собираю участников...")
+                # Собираем уникальных пользователей из сообщений
+                unique_users = {}
+                user_count = 0
                 
-                # Собираем участников
-                participants = []
-                async for user in self.bot_client.iter_participants(chat, limit=100):
-                    if not user.bot and user.username:  # Только пользователи с username
-                        participants.append({
-                            'id': user.id,
-                            'username': user.username,
-                            'first_name': user.first_name or '',
-                            'last_name': user.last_name or ''
-                        })
+                async for msg in self.bot_client.iter_messages(chat, limit=1000):
+                    if user_count >= 50:  # Останавливаемся на 50 пользователях
+                        break
+                    
+                    if msg.sender_id and msg.sender_id not in unique_users:
+                        try:
+                            user = await self.bot_client.get_entity(msg.sender_id)
+                            
+                            # Сохраняем информацию о пользователе
+                            unique_users[msg.sender_id] = {
+                                'id': user.id,
+                                'username': user.username or 'Нет username',
+                                'first_name': user.first_name or '',
+                                'last_name': user.last_name or '',
+                                'is_bot': user.bot
+                            }
+                            user_count += 1
+                            
+                            # Обновляем прогресс каждые 10 пользователей
+                            if user_count % 10 == 0:
+                                await message.edit(f"✅ Найдено {user_count} пользователей...")
+                            
+                        except Exception as e:
+                            continue
                 
-                if len(participants) < 50:
-                    await message.edit(f"❌ В чате слишком мало пользователей с username ({len(participants)}). Нужно минимум 50.")
+                if user_count == 0:
+                    await message.edit("❌ Не удалось найти пользователей с сообщениями")
                     return
                 
-                await message.edit(f"✅ Собрано {len(participants)} пользователей! Сохраняю в файл...")
+                await message.edit(f"✅ Собрано {user_count} пользователей! Сохраняю в файл...")
                 
                 # Сохраняем в файл
-                filename = f"users_{chat_username.replace('/', '_')}.txt"
+                filename = f"chat_users_{chat_username}.txt"
                 with open(filename, 'w', encoding='utf-8') as f:
                     f.write(f"Парсинг чата: {chat_username}\n")
                     f.write(f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                    f.write(f"Всего пользователей: {len(participants)}\n\n")
+                    f.write(f"Уникальных пользователей: {user_count}\n")
+                    f.write("=" * 50 + "\n\n")
                     
-                    for i, user in enumerate(participants, 1):
-                        f.write(f"{i}. @{user['username']} | ID: {user['id']} | {user['first_name']} {user['last_name']}\n")
+                    for i, (user_id, user_data) in enumerate(unique_users.items(), 1):
+                        user_type = "🤖 Бот" if user_data['is_bot'] else "👤 Пользователь"
+                        f.write(f"{i}. {user_type}\n")
+                        f.write(f"   ID: {user_data['id']}\n")
+                        f.write(f"   Username: @{user_data['username']}\n")
+                        f.write(f"   Имя: {user_data['first_name']} {user_data['last_name']}\n")
+                        f.write(f"   Ссылка: https://t.me/{user_data['username']}\n")
+                        f.write("-" * 30 + "\n")
                 
                 # Отправляем файл пользователю
                 await message.edit("📁 Файл готов! Отправляю...")
@@ -338,13 +326,15 @@ https://t.me/joinchat/AAAAAE0XQ0Q
 
 📊 Результаты:
 • Чат: {chat_username}
-• Пользователей собрано: {len(participants)}
+• Пользователей найдено: {user_count}
 • Файл: {filename}
 
 💾 Файл содержит:
-- Username пользователей
-- User ID
+- ID пользователей
+- Username (если есть)
 - Имена и фамилии
+- Ссылки на профили
+- Тип аккаунта (бот/пользователь)
                 """
                 
                 await self.bot_client.send_file(
@@ -376,10 +366,7 @@ https://t.me/joinchat/AAAAAE0XQ0Q
 
 # Запуск бота
 if __name__ == '__main__':
-    import time
-    from datetime import datetime
-    
-    bot = TelegramParserBot()
+    bot = TelegramMessageParserBot()
     
     try:
         asyncio.run(bot.run())
