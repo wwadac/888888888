@@ -106,6 +106,10 @@ class SimpleAuthBot:
             user_id = event.sender_id
             data = event.data.decode('utf-8')
             
+            if data == "resend_code":
+                await self.resend_code(event)
+                return
+                
             if not await self.is_user_authorized(user_id):
                 await event.answer("❌ Сначала авторизуйтесь!", alert=True)
                 return
@@ -116,8 +120,6 @@ class SimpleAuthBot:
                 await event.answer("⚙️ Настройки скоро будут доступны!", alert=True)
             elif data == "logout":
                 await self.logout_user(event)
-            elif data == "resend_code":
-                await self.resend_code(event)
     
     async def is_user_authorized(self, user_id):
         """Проверка авторизации пользователя"""
@@ -166,7 +168,8 @@ class SimpleAuthBot:
             self.user_sessions[user_id] = {
                 'phone': phone,
                 'client': client,
-                'phone_code_hash': sent_code.phone_code_hash
+                'phone_code_hash': sent_code.phone_code_hash,
+                'created_at': datetime.now()
             }
             
             self.user_states[user_id] = 'waiting_code'
@@ -178,6 +181,7 @@ class SimpleAuthBot:
             await event.reply(
                 f"✅ **Код отправлен на номер {phone}**\n\n"
                 "📨 Проверьте ваши Telegram приложения и введите полученный код:\n\n"
+                "⏰ **Код действителен 5 минут**\n"
                 "**Введите код:**",
                 buttons=buttons
             )
@@ -202,8 +206,16 @@ class SimpleAuthBot:
             await event.reply("❌ **Код должен содержать 5 цифр!**\n\n**Введите код еще раз:**")
             return
         
+        # Проверяем не истек ли код (больше 5 минут)
+        session_data = self.user_sessions[user_id]
+        time_diff = datetime.now() - session_data['created_at']
+        if time_diff.total_seconds() > 300:  # 5 минут
+            await event.reply("❌ **Код истек!** Отправьте код повторно.")
+            buttons = [[Button.inline("🔄 Отправить код повторно", b"resend_code")]]
+            await event.reply("Нажмите кнопку для повторной отправки кода:", buttons=buttons)
+            return
+        
         try:
-            session_data = self.user_sessions[user_id]
             client = session_data['client']
             
             # Пытаемся войти с кодом
@@ -223,6 +235,10 @@ class SimpleAuthBot:
             if 'password' in error_msg.lower():
                 await event.reply("🔒 **Требуется пароль 2FA**\n\nВведите ваш пароль двухфакторной аутентификации:")
                 self.user_states[user_id] = 'waiting_password'
+            elif 'code' in error_msg.lower() and 'expired' in error_msg.lower():
+                await event.reply("❌ **Код истек!** Отправьте код повторно.")
+                buttons = [[Button.inline("🔄 Отправить код повторно", b"resend_code")]]
+                await event.reply("Нажмите кнопку для повторной отправки кода:", buttons=buttons)
             else:
                 await event.reply(f"❌ **Неверный код!**\n\nОшибка: {error_msg}\n\n**Введите код еще раз:**")
     
@@ -254,15 +270,51 @@ class SimpleAuthBot:
         if user_id in self.user_sessions:
             try:
                 session_data = self.user_sessions[user_id]
-                sent_code = await session_data['client'].send_code_request(session_data['phone'])
+                
+                # Закрываем старый клиент и создаем новый
+                if session_data.get('client'):
+                    await session_data['client'].disconnect()
+                
+                # Создаем новый клиент
+                session_name = f"user_{user_id}"
+                client = TelegramClient(session_name, self.API_ID, self.API_HASH)
+                await client.connect()
+                
+                # Отправляем новый код
+                sent_code = await client.send_code_request(session_data['phone'])
+                
+                # Обновляем данные сессии
+                session_data['client'] = client
                 session_data['phone_code_hash'] = sent_code.phone_code_hash
+                session_data['created_at'] = datetime.now()
                 
                 await event.answer("✅ Код отправлен повторно!", alert=True)
-                await event.edit("📨 **Код отправлен повторно!**\n\nВведите полученный код:")
+                
+                # Редактируем сообщение или отправляем новое
+                try:
+                    await event.edit(
+                        f"✅ **Новый код отправлен на номер {session_data['phone']}**\n\n"
+                        "📨 Проверьте ваши Telegram приложения и введите полученный код:\n\n"
+                        "⏰ **Код действителен 5 минут**\n"
+                        "**Введите код:**",
+                        buttons=[[Button.inline("🔄 Отправить код повторно", b"resend_code")]]
+                    )
+                except:
+                    await event.reply(
+                        f"✅ **Новый код отправлен на номер {session_data['phone']}**\n\n"
+                        "📨 Проверьте ваши Telegram приложения и введите полученный код:\n\n"
+                        "⏰ **Код действителен 5 минут**\n"
+                        "**Введите код:**",
+                        buttons=[[Button.inline("🔄 Отправить код повторно", b"resend_code")]]
+                    )
+                    
+                logger.info(f"📨 Код повторно отправлен на {session_data['phone']} для пользователя {user_id}")
+                
             except Exception as e:
-                await event.answer("❌ Ошибка отправки кода!", alert=True)
+                logger.error(f"❌ Ошибка повторной отправки кода: {e}")
+                await event.answer(f"❌ Ошибка: {str(e)}", alert=True)
         else:
-            await event.answer("❌ Сессия устарела! Начните заново.", alert=True)
+            await event.answer("❌ Сессия устарела! Начните заново с /start", alert=True)
     
     async def handle_success_auth(self, event, user_id, session_data):
         """Обработка успешной авторизации"""
@@ -278,10 +330,11 @@ class SimpleAuthBot:
             client = session_data['client']
             me = await client.get_me()
             
+            # Сохраняем сессию
+            await client.disconnect()
+            
             # Очищаем временные данные
             if user_id in self.user_sessions:
-                # Отключаем клиент, но сохраняем сессию
-                await client.disconnect()
                 del self.user_sessions[user_id]
             if user_id in self.user_states:
                 del self.user_states[user_id]
