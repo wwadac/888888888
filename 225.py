@@ -2,306 +2,314 @@ import asyncio
 import logging
 import time
 import sqlite3
+import os
 from telethon import TelegramClient, events, Button
+from telethon.tl.types import Document, MessageMediaDocument
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class FileTransferBot:
+class ChannelAnalyzerBot:
     def __init__(self):
         self.API_ID = '29385016'
         self.API_HASH = '3c57df8805ab5de5a23a032ed39b9af9'
         self.BOT_TOKEN = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'
         
         self.bot_client = None
+        self.user_client = None
         self.setup_database()
-        self.allowed_extensions = ['.zip', '.rar', '.py']
-        self.transfer_tasks = {}
-        self.waiting_for_channel = {}  # Для пошагового добавления каналов
     
     def setup_database(self):
-        """Настройка базы данных"""
-        self.conn = sqlite3.connect('file_transfer.db', check_same_thread=False)
+        """Настройка базы данных для каналов"""
+        self.conn = sqlite3.connect('channels.db', check_same_thread=False)
         self.cursor = self.conn.cursor()
         
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_channel TEXT UNIQUE,
-                destination_channel TEXT,
-                added_time REAL
+                username TEXT UNIQUE,
+                title TEXT,
+                participants_count INTEGER,
+                files_count INTEGER,
+                voices_count INTEGER,
+                last_checked REAL
             )
         ''')
-        
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS settings (
-                id INTEGER PRIMARY KEY,
-                interval INTEGER DEFAULT 10,
-                max_files INTEGER DEFAULT 100
-            )
-        ''')
-        
-        self.cursor.execute('INSERT OR IGNORE INTO settings (id, interval, max_files) VALUES (1, 10, 100)')
         self.conn.commit()
     
     async def initialize(self):
-        """Инициализация только бота"""
-        self.bot_client = TelegramClient(
-            'bot_session', 
-            self.API_ID, 
-            self.API_HASH
-        )
-        
+        """Инициализация бота и пользовательского клиента"""
+        # Бот для команд
+        self.bot_client = TelegramClient('bot_session', self.API_ID, self.API_HASH)
         await self.bot_client.start(bot_token=self.BOT_TOKEN)
+        
+        # Пользовательский клиент для анализа (ТВОЙ аккаунт)
+        if os.path.exists('user_session.session'):
+            self.user_client = TelegramClient('user_session', self.API_ID, self.API_HASH)
+            await self.user_client.start()
+            logger.info("✅ User client запущен от твоего аккаунта!")
+            
+            # Проверяем какой аккаунт
+            me = await self.user_client.get_me()
+            logger.info(f"🔑 Работаем от: {me.first_name} (@{me.username})")
+        else:
+            logger.warning("❌ Файл сессии не найден. Анализ не будет работать!")
+            self.user_client = None
+        
         self.setup_handlers()
         logger.info("Бот инициализирован")
     
     def setup_handlers(self):
-        """Настройка обработчиков"""
+        """Настройка обработчиков команд"""
         
         @self.bot_client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
-            menu_text = """
-📁 File Transfer Bot
+            status = "✅ Готов к работе" if self.user_client else "❌ Требуется сессия"
+            menu_text = f"""
+📊 Channel Analyzer Bot
 
-Пересылает файлы (zip/rar/py) между каналами
+Статус: {status}
+Аккаунт: Твой личный аккаунт
 
 Команды:
-/add_channel - Добавить канал
-/list_channels - Список каналов  
-/settings - Настройки
-/transfer - Начать пересылку
+/analyze @channel - Проанализировать канал
+/add_channel @channel - Добавить канал в базу
+/list_channels - Список каналов в базе
+/stats - Статистика всех каналов
+/scan_all - Просканировать все каналы из базы
 /help - Помощь
             """
-            buttons = [
-                [Button.inline("➕ Добавить канал", b"add_channel_menu")],
-                [Button.inline("📋 Список каналов", b"list_channels")],
-                [Button.inline("⚙️ Настройки", b"show_settings")]
-            ]
-            await event.reply(menu_text, buttons=buttons)
+            await event.reply(menu_text)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/analyze'))
+        async def analyze_handler(event):
+            """Анализ одного канала"""
+            if not self.user_client:
+                await event.reply("❌ Ошибка: пользовательская сессия не найдена!")
+                return
+            
+            try:
+                parts = event.text.split()
+                if len(parts) < 2:
+                    await event.reply("❌ Использование: /analyze @channelname")
+                    return
+                
+                channel_input = parts[1].replace('@', '')
+                await event.reply(f"🔍 Анализирую @{channel_input}...")
+                
+                # Анализируем канал
+                result = await self.analyze_channel(channel_input)
+                
+                if result:
+                    response = f"""
+📊 **Анализ канала:** @{channel_input}
+
+📢 **Название:** {result['title']}
+👥 **Участники:** {result['participants_count']}
+📁 **Файлы:** {result['files_count']}
+🎤 **Голосовые:** {result['voices_count']}
+📅 **Сообщений всего:** {result['total_messages']}
+🕒 **Проверено:** {result['checked_time']}
+                    """
+                else:
+                    response = f"❌ Не удалось проанализировать @{channel_input}"
+                
+                await event.reply(response)
+                
+            except Exception as e:
+                await event.reply(f"❌ Ошибка: {e}")
         
         @self.bot_client.on(events.NewMessage(pattern='/add_channel'))
         async def add_channel_handler(event):
-            """Начинаем процесс добавления канала"""
-            user_id = event.sender_id
-            self.waiting_for_channel[user_id] = 'waiting_source'
-            
-            await event.reply("""
-📥 Добавление канала
-
-Шаг 1/2: Отправьте исходный канал (откуда брать файлы)
-
-Можно в формате:
-@username
--1002550241842
-https://t.me/channelname
-            """)
+            """Добавить канал в базу"""
+            try:
+                parts = event.text.split()
+                if len(parts) < 2:
+                    await event.reply("❌ Использование: /add_channel @channelname")
+                    return
+                
+                channel_input = parts[1].replace('@', '')
+                
+                # Сохраняем в базу
+                self.cursor.execute(
+                    'INSERT OR IGNORE INTO channels (username, last_checked) VALUES (?, ?)',
+                    (channel_input, time.time())
+                )
+                self.conn.commit()
+                
+                await event.reply(f"✅ Канал @{channel_input} добавлен в базу")
+                
+            except Exception as e:
+                await event.reply(f"❌ Ошибка: {e}")
         
         @self.bot_client.on(events.NewMessage(pattern='/list_channels'))
         async def list_channels_handler(event):
-            """Список каналов"""
+            """Список каналов в базе"""
             channels = self.get_channels()
             if not channels:
-                await event.reply("❌ Каналы не добавлены")
+                await event.reply("❌ В базе нет каналов")
                 return
             
-            text = "📋 Список каналов:\n\n"
+            text = "📋 **Каналы в базе:**\n\n"
             for i, channel in enumerate(channels, 1):
-                text += f"{i}. {channel[1]} → {channel[2]}\n"
+                status = "✅" if channel[4] else "❌"
+                text += f"{i}. {status} @{channel[1]}\n"
             
             await event.reply(text)
         
-        @self.bot_client.on(events.NewMessage(pattern='/settings'))
-        async def settings_handler(event):
-            """Настройки бота"""
-            settings = self.get_settings()
+        @self.bot_client.on(events.NewMessage(pattern='/stats'))
+        async def stats_handler(event):
+            """Статистика всех каналов"""
+            channels = self.get_channels_with_stats()
+            if not channels:
+                await event.reply("❌ Нет данных для статистики")
+                return
+            
+            total_files = sum(channel[4] or 0 for channel in channels)
+            total_voices = sum(channel[5] or 0 for channel in channels)
+            total_participants = sum(channel[3] or 0 for channel in channels)
+            
             text = f"""
-⚙️ Настройки бота
+📈 **Общая статистика:**
 
-Интервал: {settings['interval']} секунд
-Макс. файлов: {settings['max_files']}
+📊 Каналов в базе: {len(channels)}
+📁 Всего файлов: {total_files}
+🎤 Всего голосовых: {total_voices}
+👥 Сумма участников: {total_participants}
 
-Команды:
-/set_interval [секунды]
-/set_max [число]
-            """
+**Топ каналов по файлам:**
+"""
+            
+            # Сортируем по количеству файлов
+            sorted_channels = sorted([c for c in channels if c[4]], key=lambda x: x[4], reverse=True)[:5]
+            
+            for i, channel in enumerate(sorted_channels, 1):
+                text += f"{i}. @{channel[1]} - {channel[4]} файлов\n"
+            
             await event.reply(text)
         
-        @self.bot_client.on(events.NewMessage(pattern='/set_interval'))
-        async def set_interval_handler(event):
-            """Установка интервала"""
-            try:
-                parts = event.text.split()
-                if len(parts) < 2:
-                    await event.reply("Использование: /set_interval [секунды]")
-                    return
-                
-                interval = int(parts[1])
-                if interval < 1:
-                    await event.reply("Интервал должен быть не менее 1 секунды")
-                    return
-                
-                self.update_setting('interval', interval)
-                await event.reply(f"✅ Интервал установлен: {interval} секунд")
-                
-            except ValueError:
-                await event.reply("Введите число")
-        
-        @self.bot_client.on(events.NewMessage(pattern='/set_max'))
-        async def set_max_handler(event):
-            """Установка максимального количества файлов"""
-            try:
-                parts = event.text.split()
-                if len(parts) < 2:
-                    await event.reply("Использование: /set_max [число]")
-                    return
-                
-                max_files = int(parts[1])
-                if max_files < 1:
-                    await event.reply("Количество должно быть не менее 1")
-                    return
-                
-                self.update_setting('max_files', max_files)
-                await event.reply(f"✅ Максимум файлов установлен: {max_files}")
-                
-            except ValueError:
-                await event.reply("Введите число")
-        
-        @self.bot_client.on(events.NewMessage(pattern='/transfer'))
-        async def transfer_handler(event):
-            """Начать пересылку"""
+        @self.bot_client.on(events.NewMessage(pattern='/scan_all'))
+        async def scan_all_handler(event):
+            """Сканировать все каналы из базы"""
+            if not self.user_client:
+                await event.reply("❌ Ошибка: пользовательская сессия не найдена!")
+                return
+            
             channels = self.get_channels()
             if not channels:
-                await event.reply("❌ Сначала добавьте каналы через /add_channel")
+                await event.reply("❌ В базе нет каналов")
                 return
             
-            await event.reply("🔄 Пересылка файлов... (функция в разработке)")
-            # Здесь будет код пересылки файлов
-        
-        @self.bot_client.on(events.CallbackQuery)
-        async def callback_handler(event):
-            """Обработчик inline кнопок"""
-            data = event.data.decode('utf-8')
-            user_id = event.sender_id
+            await event.reply(f"🔄 Начинаю сканирование {len(channels)} каналов...")
             
-            if data == "add_channel_menu":
-                await add_channel_handler(event)
-            elif data == "list_channels":
-                await list_channels_handler(event)
-            elif data == "show_settings":
-                await settings_handler(event)
-        
-        @self.bot_client.on(events.NewMessage)
-        async def message_handler(event):
-            """Обработчик обычных сообщений для пошагового добавления каналов"""
-            user_id = event.sender_id
-            text = event.text.strip()
-            
-            if text.startswith('/'):
-                return
-            
-            # Проверяем, находится ли пользователь в процессе добавления канала
-            if user_id in self.waiting_for_channel:
-                step = self.waiting_for_channel[user_id]
-                
-                if step == 'waiting_source':
-                    # Сохраняем исходный канал и запрашиваем целевой
-                    source_channel = self.clean_channel_input(text)
-                    self.waiting_for_channel[user_id] = {
-                        'step': 'waiting_destination',
-                        'source': source_channel
-                    }
+            scanned = 0
+            for channel in channels:
+                try:
+                    username = channel[1]
+                    await event.reply(f"🔍 Сканирую @{username}...")
                     
-                    await event.reply(f"""
-✅ Исходный канал: {source_channel}
-
-Шаг 2/2: Отправьте целевой канал (куда пересылать файлы)
-
-Формат:
-@username  
--1002550241842
-https://t.me/channelname
-                    """)
-                
-                elif step['step'] == 'waiting_destination':
-                    # Сохраняем целевой канал в базу
-                    destination_channel = self.clean_channel_input(text)
-                    source_channel = step['source']
-                    
-                    try:
-                        self.cursor.execute(
-                            'INSERT OR REPLACE INTO channels (source_channel, destination_channel, added_time) VALUES (?, ?, ?)',
-                            (source_channel, destination_channel, time.time())
+                    result = await self.analyze_channel(username)
+                    if result:
+                        # Обновляем данные в базе
+                        self.update_channel_stats(
+                            username,
+                            result['title'],
+                            result['participants_count'],
+                            result['files_count'],
+                            result['voices_count']
                         )
-                        self.conn.commit()
-                        
-                        await event.reply(f"""
-✅ Канал успешно добавлен!
-
-📥 Источник: {source_channel}
-📤 Назначение: {destination_channel}
-
-Теперь можно начать пересылку файлов командой /transfer
-                        """)
-                        
-                    except Exception as e:
-                        await event.reply(f"❌ Ошибка при добавлении канала: {e}")
+                        scanned += 1
                     
-                    # Очищаем состояние пользователя
-                    if user_id in self.waiting_for_channel:
-                        del self.waiting_for_channel[user_id]
+                    # Задержка чтобы не спамить
+                    await asyncio.sleep(2)
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка сканирования @{channel[1]}: {e}")
+                    continue
+            
+            await event.reply(f"✅ Сканирование завершено! Обработано: {scanned}/{len(channels)} каналов")
     
-    def clean_channel_input(self, text):
-        """Очищает ввод канала от лишних символов"""
-        # Убираем пробелы
-        text = text.strip()
-        
-        # Если это URL, извлекаем username
-        if 't.me/' in text:
-            if text.startswith('https://t.me/'):
-                text = '@' + text.split('https://t.me/')[-1]
-            elif text.startswith('t.me/'):
-                text = '@' + text.split('t.me/')[-1]
-        
-        # Убираем @ если их несколько
-        if text.startswith('@@'):
-            text = '@' + text[2:]
-        
-        return text
+    async def analyze_channel(self, username):
+        """Анализ канала - подсчет файлов, голосовых и т.д."""
+        try:
+            # Получаем информацию о канале
+            channel = await self.user_client.get_entity(username)
+            
+            files_count = 0
+            voices_count = 0
+            total_messages = 0
+            
+            # Анализируем последние сообщения (можно увеличить лимит)
+            async for message in self.user_client.iter_messages(channel, limit=1000):
+                total_messages += 1
+                
+                if message.media:
+                    if isinstance(message.media, MessageMediaDocument):
+                        document = message.media.document
+                        if isinstance(document, Document):
+                            # Считаем файлы
+                            files_count += 1
+                            
+                            # Проверяем голосовые сообщения
+                            if hasattr(document, 'mime_type') and document.mime_type == 'audio/ogg':
+                                voices_count += 1
+            
+            # Получаем количество участников (если канал публичный)
+            participants_count = 0
+            try:
+                participants = await self.user_client.get_participants(channel)
+                participants_count = len(participants)
+            except:
+                # Если нельзя получить участников, используем приблизительное число
+                participants_count = getattr(channel, 'participants_count', 0)
+            
+            return {
+                'title': getattr(channel, 'title', 'Неизвестно'),
+                'participants_count': participants_count,
+                'files_count': files_count,
+                'voices_count': voices_count,
+                'total_messages': total_messages,
+                'checked_time': time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+        except Exception as e:
+            logger.error(f"Ошибка анализа канала @{username}: {e}")
+            return None
     
     def get_channels(self):
+        """Получить список каналов"""
         self.cursor.execute('SELECT * FROM channels')
         return self.cursor.fetchall()
     
-    def get_settings(self):
-        self.cursor.execute('SELECT * FROM settings WHERE id = 1')
-        result = self.cursor.fetchone()
-        return {'interval': result[1], 'max_files': result[2]}
+    def get_channels_with_stats(self):
+        """Получить каналы со статистикой"""
+        self.cursor.execute('SELECT * FROM channels WHERE files_count IS NOT NULL')
+        return self.cursor.fetchall()
     
-    def update_setting(self, setting, value):
-        self.cursor.execute(f'UPDATE settings SET {setting} = ? WHERE id = 1', (value,))
+    def update_channel_stats(self, username, title, participants, files, voices):
+        """Обновить статистику канала"""
+        self.cursor.execute('''
+            UPDATE channels 
+            SET title = ?, participants_count = ?, files_count = ?, voices_count = ?, last_checked = ?
+            WHERE username = ?
+        ''', (title, participants, files, voices, time.time(), username))
         self.conn.commit()
     
     async def run(self):
         await self.initialize()
-        logger.info("File Transfer Bot запущен")
-        
-        me = await self.bot_client.get_me()
-        logger.info(f"Бот @{me.username} работает")
-        
+        logger.info("Channel Analyzer Bot запущен")
         await self.bot_client.run_until_disconnected()
 
 # Запуск бота
 if __name__ == '__main__':
-    bot = FileTransferBot()
+    bot = ChannelAnalyzerBot()
     
     try:
         asyncio.run(bot.run())
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"Критическая ошибка: {e}")
     finally:
         if hasattr(bot, 'conn'):
             bot.conn.close()
