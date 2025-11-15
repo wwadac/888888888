@@ -5,7 +5,6 @@ import time
 from datetime import datetime
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import (
-    Document, Photo, DocumentVideo, DocumentAudio, 
     MessageMediaDocument, MessageMediaPhoto
 )
 
@@ -250,8 +249,8 @@ class ChannelForwardBot:
     
     async def is_admin(self, user_id):
         """Проверка, является ли пользователь администратором"""
-        # Добавьте сюда ID администраторов
-        admins = [123456789, 987654321]  # Замените на реальные ID
+        # ЗАМЕНИТЕ НА ВАШИ ID АДМИНИСТРАТОРОВ!
+        admins = [8000395560, 6893832048]  # Замените на реальные ID
         return user_id in admins
     
     async def get_channel_stats(self, channel_identifier):
@@ -261,29 +260,28 @@ class ChannelForwardBot:
             total_files = 0
             total_messages = 0
             
-            async for message in self.client.iter_messages(channel):
+            # Ограничим количество проверяемых сообщений для скорости
+            async for message in self.client.iter_messages(channel, limit=1000):
                 total_messages += 1
                 if message.media:
-                    if (isinstance(message.media, (MessageMediaDocument, MessageMediaPhoto)) or 
-                        hasattr(message.media, 'document') or 
-                        hasattr(message.media, 'photo')):
-                        total_files += 1
+                    total_files += 1
             
             return f"""
 📊 **Статистика канала:** `{channel_identifier}`
 
-📨 **Всего сообщений:** `{total_messages}`
-📎 **Всего файлов:** `{total_files}`
+📨 **Всего сообщений (последние 1000):** `{total_messages}`
+📎 **Файлов найдено:** `{total_files}`
 👥 **Участников:** `{getattr(channel, 'participants_count', 'N/A')}`
 
 💡 **Информация:**
 • Файлами считаются: документы, фото, видео, аудио
 • Статистика обновлена: `{datetime.now().strftime('%H:%M:%S')}`
+• Просмотрено последних 1000 сообщений
             """
             
         except Exception as e:
             logger.error(f"Error getting channel stats: {e}")
-            return f"❌ **Ошибка:** Не удалось получить статистику канала `{channel_identifier}`"
+            return f"❌ **Ошибка:** Не удалось получить статистику канала `{channel_identifier}`\n\nОшибка: {str(e)}"
     
     async def process_channel_input(self, event, is_source=True):
         """Обработка ввода канала"""
@@ -300,19 +298,25 @@ class ChannelForwardBot:
             else:
                 # Проверяем, что бот админ в целевом канале
                 try:
-                    await self.bot_client.get_permissions(channel_identifier, (await self.bot_client.get_me()).id)
-                    self.update_settings(target_channel=channel_identifier)
-                    await event.reply(f"✅ **Канал-цель установлен!**\n\n`{channel_identifier}`")
-                except Exception:
-                    await event.reply("❌ **Бот не является админом в целевом канале!**")
+                    bot_me = await self.bot_client.get_me()
+                    permissions = await self.bot_client.get_permissions(channel, bot_me.id)
+                    if permissions.is_admin:
+                        self.update_settings(target_channel=channel_identifier)
+                        await event.reply(f"✅ **Канал-цель установлен!**\n\n`{channel_identifier}`")
+                    else:
+                        await event.reply("❌ **Бот не является админом в целевом канале!**")
+                        return
+                except Exception as e:
+                    await event.reply(f"❌ **Ошибка проверки прав:** {str(e)}")
                     return
             
             # Показываем обновленные настройки
-            await self.show_settings(event)
+            settings_msg = await event.reply("🔄 **Обновляю настройки...**")
+            await self.show_settings(settings_msg)
             
         except Exception as e:
             logger.error(f"Error setting channel: {e}")
-            await event.reply("❌ **Ошибка!** Проверьте правильность ввода и права доступа.")
+            await event.reply(f"❌ **Ошибка!** Проверьте правильность ввода и права доступа.\n\nОшибка: {str(e)}")
     
     async def start_forwarding(self):
         """Запуск пересылки"""
@@ -321,11 +325,13 @@ class ChannelForwardBot:
         
         self.is_running = True
         self.current_task = asyncio.create_task(self.forward_loop())
+        self.update_settings(is_active=True)
         logger.info("Forwarding started")
     
     async def stop_forwarding(self):
         """Остановка пересылки"""
         self.is_running = False
+        self.update_settings(is_active=False)
         if self.current_task:
             self.current_task.cancel()
             try:
@@ -360,9 +366,10 @@ class ChannelForwardBot:
             last_message_id = settings['last_message_id']
             new_last_message_id = last_message_id
             
+            # Получаем сообщения начиная с последнего обработанного
             async for message in self.client.iter_messages(source_channel, min_id=last_message_id):
                 if message.id > new_last_message_id:
-                    new_last_message_id = message.id
+                    new_last_message_id = message_id
                 
                 if message.media and message.id > last_message_id:
                     try:
@@ -381,7 +388,7 @@ class ChannelForwardBot:
                         self.conn.commit()
                         
                         # Ждем перед следующим сообщением
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(1)
                         
                     except Exception as e:
                         logger.error(f"Error forwarding message {message.id}: {e}")
@@ -403,14 +410,23 @@ class ChannelForwardBot:
             if event.text.startswith('/'):
                 return
             
-            settings = self.get_settings()
-            if not settings['source_channel']:
-                await self.process_channel_input(event, is_source=True)
-            elif not settings['target_channel']:
-                await self.process_channel_input(event, is_source=False)
+            # Проверяем контекст - если пользователь нажал кнопку установки канала
+            try:
+                settings = self.get_settings()
+                if not settings['source_channel']:
+                    await self.process_channel_input(event, is_source=True)
+                elif not settings['target_channel']:
+                    await self.process_channel_input(event, is_source=False)
+            except Exception as e:
+                logger.error(f"Error in message handler: {e}")
         
         logger.info("🤖 Бот запущен и готов к работе!")
         logger.info("👨‍💼 Отправьте /start в боте для доступа к админ-панели")
+        
+        # Автозапуск если был активен
+        settings = self.get_settings()
+        if settings['is_active']:
+            await self.start_forwarding()
         
         await self.bot_client.run_until_disconnected()
 
