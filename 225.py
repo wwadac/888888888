@@ -1,446 +1,331 @@
 import asyncio
 import logging
 import sqlite3
-import time
+import os
+import sys
 from datetime import datetime
-from telethon import TelegramClient, events, Button
-from telethon.tl.types import (
-    MessageMediaDocument, MessageMediaPhoto
-)
+
+# Проверка зависимостей
+try:
+    from telethon import TelegramClient, events, Button
+    print("✅ Telethon успешно импортирован")
+except ImportError:
+    print("❌ Telethon не установлен! Запустите: pip install telethon==1.28.5")
+    sys.exit(1)
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class ChannelForwardBot:
+class SimpleAuthBot:
     def __init__(self):
-        self.API_ID = '29385016'  # Ваш API ID
-        self.API_HASH = '3c57df8805ab5de5a23a032ed39b9af9'  # Ваш API HASH
-        self.BOT_TOKEN = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'  # Токен бота
+        # ⚠️ ЗАМЕНИТЕ ЭТИ ДАННЫЕ НА РЕАЛЬНЫЕ!
+        self.API_ID = 29385016
+        self.API_HASH = '3c57df8805ab5de5a23a032ed39b9af9'
+        self.BOT_TOKEN = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'
         
-        self.client = None
         self.bot_client = None
         self.setup_database()
         
-        # Настройки по умолчанию
-        self.forward_interval = 60  # Интервал в секундах
-        self.is_running = False
-        self.current_task = None
+        # Состояния пользователей
+        self.user_states = {}  # user_id -> 'waiting_phone', 'waiting_code', etc.
+        self.user_sessions = {}  # user_id -> session_data
         
     def setup_database(self):
-        """Настройка базы данных для хранения настроек"""
-        self.conn = sqlite3.connect('forward_settings.db', check_same_thread=False)
+        """Настройка простой базы данных"""
+        self.conn = sqlite3.connect('users.db', check_same_thread=False)
         self.cursor = self.conn.cursor()
         
-        # Таблица с настройками
         self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS bot_settings (
-                id INTEGER PRIMARY KEY,
-                source_channel TEXT,
-                target_channel TEXT,
-                forward_interval INTEGER DEFAULT 60,
-                last_message_id INTEGER DEFAULT 0,
-                is_active INTEGER DEFAULT 0
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                phone TEXT,
+                authorized_at TEXT,
+                is_active INTEGER DEFAULT 1
             )
         ''')
-        
-        # Таблица со статистикой
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS statistics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT,
-                files_forwarded INTEGER,
-                operation_time REAL
-            )
-        ''')
-        
-        # Инициализация настроек если их нет
-        self.cursor.execute('SELECT COUNT(*) FROM bot_settings')
-        if self.cursor.fetchone()[0] == 0:
-            self.cursor.execute(
-                'INSERT INTO bot_settings (id, forward_interval) VALUES (1, 60)'
-            )
-        
         self.conn.commit()
-    
-    def get_settings(self):
-        """Получение текущих настроек"""
-        self.cursor.execute('SELECT * FROM bot_settings WHERE id = 1')
-        result = self.cursor.fetchone()
-        if result:
-            return {
-                'source_channel': result[1],
-                'target_channel': result[2],
-                'forward_interval': result[3],
-                'last_message_id': result[4],
-                'is_active': bool(result[5])
-            }
-        return None
-    
-    def update_settings(self, source_channel=None, target_channel=None, interval=None, last_message_id=None, is_active=None):
-        """Обновление настроек"""
-        settings = self.get_settings()
-        if not settings:
-            return
-        
-        source = source_channel if source_channel is not None else settings['source_channel']
-        target = target_channel if target_channel is not None else settings['target_channel']
-        interval_val = interval if interval is not None else settings['forward_interval']
-        last_msg = last_message_id if last_message_id is not None else settings['last_message_id']
-        active = is_active if is_active is not None else settings['is_active']
-        
-        self.cursor.execute('''
-            UPDATE bot_settings 
-            SET source_channel = ?, target_channel = ?, forward_interval = ?, last_message_id = ?, is_active = ?
-            WHERE id = 1
-        ''', (source, target, interval_val, last_msg, int(active)))
-        self.conn.commit()
+        logger.info("✅ База данных готова")
     
     async def initialize(self):
-        """Инициализация клиентов"""
-        # Клиент для вашего аккаунта
-        self.client = TelegramClient('user_session', self.API_ID, self.API_HASH)
-        await self.client.start()
-        
-        # Клиент для бота
-        self.bot_client = TelegramClient('bot_session', self.API_ID, self.API_HASH)
-        await self.bot_client.start(bot_token=self.BOT_TOKEN)
-        
-        self.setup_handlers()
-        logger.info("Клиенты инициализированы")
+        """Инициализация бота без запроса телефона в консоли"""
+        try:
+            logger.info("🔄 Запускаю бота...")
+            
+            self.bot_client = TelegramClient(
+                'bot_session', 
+                self.API_ID, 
+                self.API_HASH
+            )
+            
+            # Запускаем бота без интерактивного ввода
+            await self.bot_client.start(bot_token=self.BOT_TOKEN)
+            
+            logger.info("✅ Бот успешно запущен!")
+            self.setup_handlers()
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации: {e}")
+            raise
     
     def setup_handlers(self):
-        """Настройка обработчиков для бота"""
+        """Настройка обработчиков сообщений"""
         
         @self.bot_client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
-            """Главное меню"""
+            """Обработчик команды /start"""
             user_id = event.sender_id
-            if not await self.is_admin(user_id):
-                await event.reply("❌ **Доступ запрещен!**\n\nВы не являетесь администратором.")
+            logger.info(f"👤 Пользователь {user_id} запустил бота")
+            
+            if await self.is_user_authorized(user_id):
+                await self.show_main_menu(event)
+            else:
+                await self.start_auth(event)
+        
+        @self.bot_client.on(events.NewMessage)
+        async def message_handler(event):
+            """Обработчик всех сообщений"""
+            user_id = event.sender_id
+            text = event.text.strip()
+            
+            if text.startswith('/'):
                 return
+                
+            state = self.user_states.get(user_id, 'start')
             
-            settings = self.get_settings()
-            status = "🟢 **АКТИВЕН**" if self.is_running else "🔴 **ОСТАНОВЛЕН**"
+            if state == 'waiting_phone':
+                await self.handle_phone_input(event, text)
+            elif state == 'waiting_code':
+                await self.handle_code_input(event, text)
+    
+    async def is_user_authorized(self, user_id):
+        """Проверка авторизации пользователя"""
+        self.cursor.execute('SELECT * FROM users WHERE user_id = ? AND is_active = 1', (user_id,))
+        return self.cursor.fetchone() is not None
+    
+    async def start_auth(self, event):
+        """Начало процесса авторизации"""
+        user_id = event.sender_id
+        
+        welcome_text = """
+🔐 **Авторизация в боте**
+
+Для использования бота необходимо авторизовать ваш Telegram аккаунт.
+
+📱 **Введите ваш номер телефона в формате:**
+• +79123456789
+• +380123456789
+
+**Отправьте ваш номер:**
+        """
+        
+        self.user_states[user_id] = 'waiting_phone'
+        await event.reply(welcome_text, parse_mode='md')
+        logger.info(f"📱 Запрошен номер у пользователя {user_id}")
+    
+    async def handle_phone_input(self, event, phone):
+        """Обработка ввода номера телефона"""
+        user_id = event.sender_id
+        
+        # Простая валидация номера
+        if not phone.startswith('+') or len(phone) < 10:
+            await event.reply("❌ **Неверный формат номера!**\n\nВведите номер в международном формате, например: +79123456789\n\n**Попробуйте еще раз:**")
+            return
+        
+        try:
+            # Создаем клиент для пользователя
+            session_name = f"user_{user_id}"
+            client = TelegramClient(session_name, self.API_ID, self.API_HASH)
+            await client.connect()
             
-            text = f"""
-🤖 **Админ-панель бота пересылки**
+            # Отправляем код
+            sent_code = await client.send_code_request(phone)
+            
+            # Сохраняем данные сессии
+            self.user_sessions[user_id] = {
+                'phone': phone,
+                'client': client,
+                'phone_code_hash': sent_code.phone_code_hash
+            }
+            
+            self.user_states[user_id] = 'waiting_code'
+            
+            await event.reply(
+                f"✅ **Код отправлен на номер {phone}**\n\n"
+                "📨 Проверьте ваши Telegram приложения и введите полученный код:\n\n"
+                "**Введите код:**"
+            )
+            logger.info(f"📨 Код отправлен на {phone} для пользователя {user_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки кода: {e}")
+            await event.reply(f"❌ **Ошибка:** {str(e)}\n\nПопробуйте другой номер или повторите позже.")
+    
+    async def handle_code_input(self, event, code):
+        """Обработка ввода кода подтверждения"""
+        user_id = event.sender_id
+        
+        if user_id not in self.user_sessions:
+            await event.reply("❌ **Сессия устарела!** Начните заново с /start")
+            return
+        
+        # Очищаем код
+        code = ''.join(filter(str.isdigit, code))
+        
+        if len(code) != 5:
+            await event.reply("❌ **Код должен содержать 5 цифр!**\n\n**Введите код еще раз:**")
+            return
+        
+        try:
+            session_data = self.user_sessions[user_id]
+            client = session_data['client']
+            
+            # Пытаемся войти с кодом
+            await client.sign_in(
+                phone=session_data['phone'],
+                code=code,
+                phone_code_hash=session_data['phone_code_hash']
+            )
+            
+            # Успешная авторизация!
+            await self.handle_success_auth(event, user_id, session_data)
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"❌ Ошибка входа: {error_msg}")
+            
+            if 'password' in error_msg.lower():
+                await event.reply("🔒 **Требуется пароль 2FA**\n\nВведите ваш пароль двухфакторной аутентификации:")
+                self.user_states[user_id] = 'waiting_password'
+            else:
+                await event.reply(f"❌ **Неверный код!**\n\nОшибка: {error_msg}\n\n**Введите код еще раз:**")
+    
+    async def handle_success_auth(self, event, user_id, session_data):
+        """Обработка успешной авторизации"""
+        try:
+            # Сохраняем пользователя в БД
+            self.cursor.execute('''
+                INSERT OR REPLACE INTO users (user_id, phone, authorized_at, is_active)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, session_data['phone'], datetime.now().isoformat(), 1))
+            self.conn.commit()
+            
+            # Получаем информацию о пользователе
+            client = session_data['client']
+            me = await client.get_me()
+            
+            # Очищаем временные данные
+            if user_id in self.user_sessions:
+                del self.user_sessions[user_id]
+            if user_id in self.user_states:
+                del self.user_states[user_id]
+            
+            success_text = f"""
+🎉 **Авторизация успешна!**
 
-📊 **Статус:** {status}
-🔄 **Интервал:** {settings['forward_interval']} секунд
+✅ Добро пожаловать, **{me.first_name or 'Пользователь'}**!
 
-📥 **Источник:** `{settings['source_channel'] or 'Не установлен'}`
-📤 **Цель:** `{settings['target_channel'] or 'Не установлен'}`
-
-⚡ **Доступные команды:**
+Теперь вы можете использовать все функции бота.
             """
             
-            buttons = [
-                [Button.inline("📊 Статистика канала", b"channel_stats"),
-                 Button.inline("⚙️ Настройки", b"settings")],
-                [Button.inline("▶️ Старт", b"start_forward"),
-                 Button.inline("⏹️ Стоп", b"stop_forward")],
-                [Button.inline("🔄 Обновить", b"refresh")]
-            ]
+            await event.reply(success_text, parse_mode='md')
+            await self.show_main_menu(event)
             
-            await event.reply(text, buttons=buttons, parse_mode='md')
-        
-        @self.bot_client.on(events.CallbackQuery)
-        async def callback_handler(event):
-            """Обработчик callback кнопок"""
-            user_id = event.sender_id
-            if not await self.is_admin(user_id):
-                await event.answer("❌ Доступ запрещен!", alert=True)
-                return
+            logger.info(f"✅ Пользователь {user_id} успешно авторизован")
             
-            data = event.data.decode('utf-8')
-            settings = self.get_settings()
-            
-            if data == "channel_stats":
-                if not settings['source_channel']:
-                    await event.answer("❌ Канал-источник не установлен!", alert=True)
-                    return
-                
-                await event.answer("🔄 Получаем статистику...", alert=False)
-                stats = await self.get_channel_stats(settings['source_channel'])
-                await event.edit(stats, parse_mode='md')
-                
-            elif data == "settings":
-                await self.show_settings(event)
-                
-            elif data == "start_forward":
-                if not settings['source_channel'] or not settings['target_channel']:
-                    await event.answer("❌ Сначала настройте каналы!", alert=True)
-                    return
-                
-                if self.is_running:
-                    await event.answer("⚠️ Бот уже работает!", alert=True)
-                    return
-                
-                await self.start_forwarding()
-                await event.answer("✅ Пересылка запущена!", alert=True)
-                await start_handler(event)
-                
-            elif data == "stop_forward":
-                if not self.is_running:
-                    await event.answer("⚠️ Бот уже остановлен!", alert=True)
-                    return
-                
-                await self.stop_forwarding()
-                await event.answer("⏹️ Пересылка остановлена!", alert=True)
-                await start_handler(event)
-                
-            elif data == "refresh":
-                await start_handler(event)
-                
-            elif data == "set_source":
-                await event.edit(
-                    "📥 **Установка канала-источника**\n\n"
-                    "Отправьте username или ID канала:\n\n"
-                    "💡 **Примеры:**\n"
-                    "• `@channel_username`\n"
-                    "• `-1001234567890`\n\n"
-                    "⚠️ **Ваш аккаунт должен быть подписан на канал!**",
-                    parse_mode='md'
-                )
-                
-            elif data == "set_target":
-                await event.edit(
-                    "📤 **Установка канала-цели**\n\n"
-                    "Отправьте username или ID канала:\n\n"
-                    "💡 **Примеры:**\n"
-                    "• `@channel_username`\n"
-                    "• `-1001234567890`\n\n"
-                    "⚠️ **Бот должен быть админом в целевом канале!**",
-                    parse_mode='md'
-                )
-                
-            elif data.startswith("interval_"):
-                interval = int(data.split("_")[1])
-                self.update_settings(interval=interval)
-                await event.answer(f"✅ Интервал установлен: {interval} сек", alert=True)
-                await self.show_settings(event)
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения сессии: {e}")
+            await event.reply("❌ **Ошибка сохранения!** Попробуйте с /start")
     
-    async def show_settings(self, event):
-        """Показать настройки"""
-        settings = self.get_settings()
-        
-        text = f"""
-⚙️ **Настройки бота**
+    async def show_main_menu(self, event):
+        """Главное меню после авторизации"""
+        menu_text = """
+🏠 **Главное меню**
 
-📥 **Канал-источник:** `{settings['source_channel'] or 'Не установлен'}`
-📤 **Канал-цель:** `{settings['target_channel'] or 'Не установлен'}`
-🔄 **Интервал:** {settings['forward_interval']} секунд
-
-📋 **Выберите действие:**
+Выберите действие:
         """
         
         buttons = [
-            [Button.inline("📥 Установить источник", b"set_source")],
-            [Button.inline("📤 Установить цель", b"set_target")],
-            [Button.inline("🔄 Интервал: 30 сек", b"interval_30"),
-             Button.inline("🔄 Интервал: 60 сек", b"interval_60")],
-            [Button.inline("🔄 Интервал: 120 сек", b"interval_120"),
-             Button.inline("🔄 Интервал: 300 сек", b"interval_300")],
-            [Button.inline("🔙 Назад", b"refresh")]
+            [Button.inline("📊 Профиль", b"profile")],
+            [Button.inline("⚙️ Настройки", b"settings")],
+            [Button.inline("🚪 Выйти", b"logout")]
         ]
         
-        await event.edit(text, buttons=buttons, parse_mode='md')
+        await event.reply(menu_text, buttons=buttons)
     
-    async def is_admin(self, user_id):
-        """Проверка, является ли пользователь администратором"""
-        # ЗАМЕНИТЕ НА ВАШИ ID АДМИНИСТРАТОРОВ!
-        admins = [8000395560, 6893832048]  # Замените на реальные ID
-        return user_id in admins
-    
-    async def get_channel_stats(self, channel_identifier):
-        """Получение статистики канала"""
-        try:
-            channel = await self.client.get_entity(channel_identifier)
-            total_files = 0
-            total_messages = 0
-            
-            # Ограничим количество проверяемых сообщений для скорости
-            async for message in self.client.iter_messages(channel, limit=1000):
-                total_messages += 1
-                if message.media:
-                    total_files += 1
-            
-            return f"""
-📊 **Статистика канала:** `{channel_identifier}`
-
-📨 **Всего сообщений (последние 1000):** `{total_messages}`
-📎 **Файлов найдено:** `{total_files}`
-👥 **Участников:** `{getattr(channel, 'participants_count', 'N/A')}`
-
-💡 **Информация:**
-• Файлами считаются: документы, фото, видео, аудио
-• Статистика обновлена: `{datetime.now().strftime('%H:%M:%S')}`
-• Просмотрено последних 1000 сообщений
-            """
-            
-        except Exception as e:
-            logger.error(f"Error getting channel stats: {e}")
-            return f"❌ **Ошибка:** Не удалось получить статистику канала `{channel_identifier}`\n\nОшибка: {str(e)}"
-    
-    async def process_channel_input(self, event, is_source=True):
-        """Обработка ввода канала"""
-        try:
-            text = event.text.strip()
-            channel_identifier = text.replace('@', '')
-            
-            # Пробуем получить информацию о канале
-            channel = await self.client.get_entity(channel_identifier)
-            
-            if is_source:
-                self.update_settings(source_channel=channel_identifier)
-                await event.reply(f"✅ **Канал-источник установлен!**\n\n`{channel_identifier}`")
-            else:
-                # Проверяем, что бот админ в целевом канале
-                try:
-                    bot_me = await self.bot_client.get_me()
-                    permissions = await self.bot_client.get_permissions(channel, bot_me.id)
-                    if permissions.is_admin:
-                        self.update_settings(target_channel=channel_identifier)
-                        await event.reply(f"✅ **Канал-цель установлен!**\n\n`{channel_identifier}`")
-                    else:
-                        await event.reply("❌ **Бот не является админом в целевом канале!**")
-                        return
-                except Exception as e:
-                    await event.reply(f"❌ **Ошибка проверки прав:** {str(e)}")
-                    return
-            
-            # Показываем обновленные настройки
-            settings_msg = await event.reply("🔄 **Обновляю настройки...**")
-            await self.show_settings(settings_msg)
-            
-        except Exception as e:
-            logger.error(f"Error setting channel: {e}")
-            await event.reply(f"❌ **Ошибка!** Проверьте правильность ввода и права доступа.\n\nОшибка: {str(e)}")
-    
-    async def start_forwarding(self):
-        """Запуск пересылки"""
-        if self.is_running:
+    @self.bot_client.on(events.CallbackQuery)
+    async def callback_handler(event):
+        """Обработчик кнопок"""
+        user_id = event.sender_id
+        data = event.data.decode('utf-8')
+        
+        if not await self.is_user_authorized(user_id):
+            await event.answer("❌ Сначала авторизуйтесь!", alert=True)
             return
         
-        self.is_running = True
-        self.current_task = asyncio.create_task(self.forward_loop())
-        self.update_settings(is_active=True)
-        logger.info("Forwarding started")
+        if data == "profile":
+            await self.show_profile(event)
+        elif data == "settings":
+            await event.answer("⚙️ Настройки скоро будут доступны!", alert=True)
+        elif data == "logout":
+            await self.logout_user(event)
     
-    async def stop_forwarding(self):
-        """Остановка пересылки"""
-        self.is_running = False
-        self.update_settings(is_active=False)
-        if self.current_task:
-            self.current_task.cancel()
-            try:
-                await self.current_task
-            except asyncio.CancelledError:
-                pass
-        logger.info("Forwarding stopped")
+    async def show_profile(self, event):
+        """Показать профиль пользователя"""
+        user_id = event.sender_id
+        
+        self.cursor.execute('SELECT phone, authorized_at FROM users WHERE user_id = ?', (user_id,))
+        result = self.cursor.fetchone()
+        
+        if result:
+            phone, auth_date = result
+            profile_text = f"""
+👤 **Ваш профиль**
+
+📱 Номер: `{phone}`
+📅 Авторизован: `{auth_date[:10]}`
+🆔 ID: `{user_id}`
+            """
+            await event.edit(profile_text, parse_mode='md')
     
-    async def forward_loop(self):
-        """Основной цикл пересылки"""
-        while self.is_running:
-            try:
-                settings = self.get_settings()
-                if not settings['source_channel'] or not settings['target_channel']:
-                    await asyncio.sleep(10)
-                    continue
-                
-                await self.forward_new_files()
-                await asyncio.sleep(settings['forward_interval'])
-                
-            except Exception as e:
-                logger.error(f"Error in forward loop: {e}")
-                await asyncio.sleep(30)
-    
-    async def forward_new_files(self):
-        """Пересылка новых файлов"""
-        try:
-            settings = self.get_settings()
-            source_channel = await self.client.get_entity(settings['source_channel'])
-            target_channel = await self.client.get_entity(settings['target_channel'])
-            
-            last_message_id = settings['last_message_id']
-            new_last_message_id = last_message_id
-            
-            # Получаем сообщения начиная с последнего обработанного
-            async for message in self.client.iter_messages(source_channel, min_id=last_message_id):
-                if message.id > new_last_message_id:
-                    new_last_message_id = message_id
-                
-                if message.media and message.id > last_message_id:
-                    try:
-                        # Пересылаем сообщение с медиа
-                        await self.client.forward_messages(target_channel, message)
-                        logger.info(f"Forwarded message {message.id}")
-                        
-                        # Обновляем last_message_id после успешной пересылки
-                        self.update_settings(last_message_id=message.id)
-                        
-                        # Записываем статистику
-                        self.cursor.execute(
-                            'INSERT INTO statistics (date, files_forwarded, operation_time) VALUES (?, ?, ?)',
-                            (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 1, time.time())
-                        )
-                        self.conn.commit()
-                        
-                        # Ждем перед следующим сообщением
-                        await asyncio.sleep(1)
-                        
-                    except Exception as e:
-                        logger.error(f"Error forwarding message {message.id}: {e}")
-            
-            # Обновляем last_message_id если были новые сообщения
-            if new_last_message_id > last_message_id:
-                self.update_settings(last_message_id=new_last_message_id)
-                
-        except Exception as e:
-            logger.error(f"Error in forward_new_files: {e}")
+    async def logout_user(self, event):
+        """Выход из аккаунта"""
+        user_id = event.sender_id
+        
+        self.cursor.execute('UPDATE users SET is_active = 0 WHERE user_id = ?', (user_id,))
+        self.conn.commit()
+        
+        # Удаляем сессию
+        session_file = f"user_{user_id}.session"
+        if os.path.exists(session_file):
+            os.remove(session_file)
+        
+        await event.edit("✅ **Вы вышли из аккаунта!**\n\nДля входа используйте /start")
+        logger.info(f"🚪 Пользователь {user_id} вышел из системы")
     
     async def run(self):
         """Запуск бота"""
         await self.initialize()
-        
-        # Обработчик для установки каналов
-        @self.bot_client.on(events.NewMessage)
-        async def message_handler(event):
-            if event.text.startswith('/'):
-                return
-            
-            # Проверяем контекст - если пользователь нажал кнопку установки канала
-            try:
-                settings = self.get_settings()
-                if not settings['source_channel']:
-                    await self.process_channel_input(event, is_source=True)
-                elif not settings['target_channel']:
-                    await self.process_channel_input(event, is_source=False)
-            except Exception as e:
-                logger.error(f"Error in message handler: {e}")
-        
         logger.info("🤖 Бот запущен и готов к работе!")
-        logger.info("👨‍💼 Отправьте /start в боте для доступа к админ-панели")
         
-        # Автозапуск если был активен
-        settings = self.get_settings()
-        if settings['is_active']:
-            await self.start_forwarding()
+        # Информация о боте
+        me = await self.bot_client.get_me()
+        logger.info(f"👤 Бот: @{me.username} (ID: {me.id})")
         
         await self.bot_client.run_until_disconnected()
 
 # Запуск бота
 if __name__ == '__main__':
-    bot = ChannelForwardBot()
+    bot = SimpleAuthBot()
     
     try:
+        print("🚀 Запускаю бота авторизации...")
         asyncio.run(bot.run())
     except KeyboardInterrupt:
-        logger.info("Бот остановлен")
+        print("\n🛑 Бот остановлен")
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+        print(f"💥 Критическая ошибка: {e}")
     finally:
         if hasattr(bot, 'conn'):
             bot.conn.close()
-
+        print("👋 Работа завершена")
