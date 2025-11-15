@@ -97,6 +97,27 @@ class SimpleAuthBot:
                 await self.handle_phone_input(event, text)
             elif state == 'waiting_code':
                 await self.handle_code_input(event, text)
+            elif state == 'waiting_password':
+                await self.handle_password_input(event, text)
+        
+        @self.bot_client.on(events.CallbackQuery)
+        async def callback_handler(event):
+            """Обработчик callback кнопок"""
+            user_id = event.sender_id
+            data = event.data.decode('utf-8')
+            
+            if not await self.is_user_authorized(user_id):
+                await event.answer("❌ Сначала авторизуйтесь!", alert=True)
+                return
+            
+            if data == "profile":
+                await self.show_profile(event)
+            elif data == "settings":
+                await event.answer("⚙️ Настройки скоро будут доступны!", alert=True)
+            elif data == "logout":
+                await self.logout_user(event)
+            elif data == "resend_code":
+                await self.resend_code(event)
     
     async def is_user_authorized(self, user_id):
         """Проверка авторизации пользователя"""
@@ -150,10 +171,15 @@ class SimpleAuthBot:
             
             self.user_states[user_id] = 'waiting_code'
             
+            buttons = [
+                [Button.inline("🔄 Отправить код повторно", b"resend_code")]
+            ]
+            
             await event.reply(
                 f"✅ **Код отправлен на номер {phone}**\n\n"
                 "📨 Проверьте ваши Telegram приложения и введите полученный код:\n\n"
-                "**Введите код:**"
+                "**Введите код:**",
+                buttons=buttons
             )
             logger.info(f"📨 Код отправлен на {phone} для пользователя {user_id}")
             
@@ -200,6 +226,44 @@ class SimpleAuthBot:
             else:
                 await event.reply(f"❌ **Неверный код!**\n\nОшибка: {error_msg}\n\n**Введите код еще раз:**")
     
+    async def handle_password_input(self, event, password):
+        """Обработка ввода пароля 2FA"""
+        user_id = event.sender_id
+        
+        if user_id not in self.user_sessions:
+            await event.reply("❌ **Сессия устарела!** Начните заново с /start")
+            return
+        
+        try:
+            session_data = self.user_sessions[user_id]
+            client = session_data['client']
+            
+            # Входим с паролем
+            await client.sign_in(password=password)
+            
+            # Успешная авторизация!
+            await self.handle_success_auth(event, user_id, session_data)
+            
+        except Exception as e:
+            await event.reply(f"❌ **Неверный пароль!**\n\nОшибка: {str(e)}\n\n**Введите пароль еще раз:**")
+    
+    async def resend_code(self, event):
+        """Повторная отправка кода"""
+        user_id = event.sender_id
+        
+        if user_id in self.user_sessions:
+            try:
+                session_data = self.user_sessions[user_id]
+                sent_code = await session_data['client'].send_code_request(session_data['phone'])
+                session_data['phone_code_hash'] = sent_code.phone_code_hash
+                
+                await event.answer("✅ Код отправлен повторно!", alert=True)
+                await event.edit("📨 **Код отправлен повторно!**\n\nВведите полученный код:")
+            except Exception as e:
+                await event.answer("❌ Ошибка отправки кода!", alert=True)
+        else:
+            await event.answer("❌ Сессия устарела! Начните заново.", alert=True)
+    
     async def handle_success_auth(self, event, user_id, session_data):
         """Обработка успешной авторизации"""
         try:
@@ -216,6 +280,8 @@ class SimpleAuthBot:
             
             # Очищаем временные данные
             if user_id in self.user_sessions:
+                # Отключаем клиент, но сохраняем сессию
+                await client.disconnect()
                 del self.user_sessions[user_id]
             if user_id in self.user_states:
                 del self.user_states[user_id]
@@ -253,23 +319,6 @@ class SimpleAuthBot:
         
         await event.reply(menu_text, buttons=buttons)
     
-    @self.bot_client.on(events.CallbackQuery)
-    async def callback_handler(event):
-        """Обработчик кнопок"""
-        user_id = event.sender_id
-        data = event.data.decode('utf-8')
-        
-        if not await self.is_user_authorized(user_id):
-            await event.answer("❌ Сначала авторизуйтесь!", alert=True)
-            return
-        
-        if data == "profile":
-            await self.show_profile(event)
-        elif data == "settings":
-            await event.answer("⚙️ Настройки скоро будут доступны!", alert=True)
-        elif data == "logout":
-            await self.logout_user(event)
-    
     async def show_profile(self, event):
         """Показать профиль пользователя"""
         user_id = event.sender_id
@@ -299,6 +348,14 @@ class SimpleAuthBot:
         session_file = f"user_{user_id}.session"
         if os.path.exists(session_file):
             os.remove(session_file)
+        
+        # Удаляем временные данные
+        if user_id in self.user_sessions:
+            if self.user_sessions[user_id].get('client'):
+                await self.user_sessions[user_id]['client'].disconnect()
+            del self.user_sessions[user_id]
+        if user_id in self.user_states:
+            del self.user_states[user_id]
         
         await event.edit("✅ **Вы вышли из аккаунта!**\n\nДля входа используйте /start")
         logger.info(f"🚪 Пользователь {user_id} вышел из системы")
