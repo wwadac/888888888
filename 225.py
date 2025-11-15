@@ -1,133 +1,75 @@
 import asyncio
 import logging
 import time
-import random
 import sqlite3
-from datetime import datetime
+import os
+import re
 from telethon import TelegramClient, events, Button
+from telethon.tl.types import Document, MessageMediaDocument
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class ComplaintBot:
+class FileTransferBot:
     def __init__(self):
         self.API_ID = '29385016'
         self.API_HASH = '3c57df8805ab5de5a23a032ed39b9af9'
         self.BOT_TOKEN = '8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk'
         
         self.bot_client = None
+        self.user_client = None
         self.setup_database()
+        self.allowed_extensions = ['.zip', '.rar', '.py']
+        self.transfer_tasks = {}
     
     def setup_database(self):
-        """Настройка базы данных для хранения запросов"""
-        self.conn = sqlite3.connect('user_limits.db', check_same_thread=False)
+        """Настройка базы данных для хранения каналов и настроек"""
+        self.conn = sqlite3.connect('file_transfer.db', check_same_thread=False)
         self.cursor = self.conn.cursor()
         
+        # Таблица для каналов
         self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_requests (
-                user_id INTEGER PRIMARY KEY,
-                request_count INTEGER DEFAULT 0,
-                last_reset_time REAL
+            CREATE TABLE IF NOT EXISTS channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_channel TEXT UNIQUE,
+                destination_channel TEXT,
+                added_time REAL
             )
         ''')
-        self.conn.commit()
-    
-    async def check_user_limit(self, user_id):
-        """Проверяет лимит запросов для пользователя"""
-        now = time.time()
         
-        self.cursor.execute(
-            'SELECT request_count, last_reset_time FROM user_requests WHERE user_id = ?',
-            (user_id,)
-        )
-        result = self.cursor.fetchone()
-        
-        if not result:
-            return True, 5
-        
-        request_count, last_reset_time = result
-        
-        if now - last_reset_time >= 2400:
-            return True, 5
-        else:
-            if request_count >= 5:
-                return False, 0
-            else:
-                return True, 5 - request_count
-    
-    async def increment_request_count(self, user_id):
-        """Увеличивает счетчик запросов"""
-        now = time.time()
-        
-        self.cursor.execute(
-            'SELECT request_count, last_reset_time FROM user_requests WHERE user_id = ?',
-            (user_id,)
-        )
-        result = self.cursor.fetchone()
-        
-        if not result:
-            self.cursor.execute(
-                'INSERT INTO user_requests (user_id, request_count, last_reset_time) VALUES (?, ?, ?)',
-                (user_id, 1, now)
+        # Таблица для настроек
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                id INTEGER PRIMARY KEY,
+                interval INTEGER DEFAULT 10,
+                max_files INTEGER DEFAULT 100
             )
-        else:
-            request_count, last_reset_time = result
-            if now - last_reset_time >= 2400:
-                self.cursor.execute(
-                    'UPDATE user_requests SET request_count = 1, last_reset_time = ? WHERE user_id = ?',
-                    (now, user_id)
-                )
-            else:
-                self.cursor.execute(
-                    'UPDATE user_requests SET request_count = request_count + 1 WHERE user_id = ?',
-                    (user_id,)
-                )
+        ''')
         
+        # Добавляем настройки по умолчанию
+        self.cursor.execute('INSERT OR IGNORE INTO settings (id, interval, max_files) VALUES (1, 10, 100)')
         self.conn.commit()
-    
-    async def get_remaining_time(self, user_id):
-        """Получает оставшееся время до сброса"""
-        self.cursor.execute(
-            'SELECT last_reset_time FROM user_requests WHERE user_id = ?',
-            (user_id,)
-        )
-        result = self.cursor.fetchone()
-        
-        if result:
-            last_reset_time = result[0]
-            elapsed = time.time() - last_reset_time
-            remaining = max(0, 2400 - elapsed)
-            return remaining
-        return 0
-    
-    async def get_user_stats(self, user_id):
-        """Получает статистику пользователя"""
-        self.cursor.execute(
-            'SELECT request_count, last_reset_time FROM user_requests WHERE user_id = ?',
-            (user_id,)
-        )
-        result = self.cursor.fetchone()
-        
-        if result:
-            request_count, last_reset_time = result
-            remaining_time = await self.get_remaining_time(user_id)
-            return {
-                'used': request_count,
-                'remaining': max(0, 5 - request_count),
-                'remaining_time': remaining_time
-            }
-        return {'used': 0, 'remaining': 5, 'remaining_time': 0}
     
     async def initialize(self):
-        """Инициализация бота"""
+        """Инициализация бота и пользовательского клиента"""
+        # Бот клиент для команд
         self.bot_client = TelegramClient(
-            'session_bot', 
+            'bot_session', 
             self.API_ID, 
             self.API_HASH
         )
         
+        # Пользовательский клиент для пересылки файлов
+        self.user_client = TelegramClient(
+            'user_session',
+            self.API_ID,
+            self.API_HASH
+        )
+        
         await self.bot_client.start(bot_token=self.BOT_TOKEN)
+        await self.user_client.start()
+        
         self.setup_handlers()
         logger.info("Бот инициализирован")
     
@@ -136,190 +78,286 @@ class ComplaintBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
-            user_id = event.sender_id
-            stats = await self.get_user_stats(user_id)
-            
-            welcome_text = f"""
-User Checker & Complaint Bot
+            """Главное меню"""
+            menu_text = """
+📁 **File Transfer Bot**
 
-У вас {stats['remaining']}/5 запросов
+Пересылает файлы (zip/rar/py) между каналами
 
-Отправьте @username или user_id для проверки
+**Команды:**
+/add_channel - Добавить канал
+/remove_channel - Удалить канал  
+/list_channels - Список каналов
+/settings - Настройки
+/transfer - Начать пересылку
+/stop - Остановить пересылку
+/stats - Статистика
             """
-            
             buttons = [
-                [Button.inline("Отправить жалобу", b"show_complaint_form")],
-                [Button.inline("Моя статистика", b"show_stats")]
+                [Button.inline("📥 Добавить канал", b"add_channel"),
+                 Button.inline("📤 Список каналов", b"list_channels")],
+                [Button.inline("⚙️ Настройки", b"settings"),
+                 Button.inline("🔄 Начать пересылку", b"start_transfer")]
             ]
-            
-            await event.reply(welcome_text, buttons=buttons)
+            await event.reply(menu_text, buttons=buttons)
         
-        @self.bot_client.on(events.NewMessage(pattern='/stats'))
-        async def stats_handler(event):
-            user_id = event.sender_id
-            stats = await self.get_user_stats(user_id)
-            
-            minutes_left = int(stats['remaining_time'] // 60)
-            seconds_left = int(stats['remaining_time'] % 60)
-            
-            stats_text = f"""
-Статистика:
+        @self.bot_client.on(events.NewMessage(pattern='/add_channel'))
+        async def add_channel_handler(event):
+            """Добавление канала"""
+            await event.reply("""
+📥 **Добавление канала**
 
-Использовано: {stats['used']}/5
-Осталось: {stats['remaining']}
-Сброс через: {minutes_left}мин {seconds_left}сек
-            """
+Отправьте в формате:
+`источник -> назначение`
+
+**Пример:**
+@source_channel -> @destination_channel
+-100123456789 -> -100987654321
+
+Или просто @username для тестового режима
+            """)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/list_channels'))
+        async def list_channels_handler(event):
+            """Список каналов"""
+            channels = self.get_channels()
+            if not channels:
+                await event.reply("❌ Каналы не добавлены")
+                return
             
-            await event.reply(stats_text)
+            text = "📋 **Список каналов:**\n\n"
+            for i, channel in enumerate(channels, 1):
+                text += f"{i}. {channel[1]} → {channel[2]}\n"
+            
+            await event.reply(text)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/settings'))
+        async def settings_handler(event):
+            """Настройки бота"""
+            settings = self.get_settings()
+            text = f"""
+⚙️ **Настройки бота**
+
+📊 Интервал: {settings['interval']} секунд
+📁 Макс. файлов за раз: {settings['max_files']}
+
+Используйте:
+/set_interval [секунды] - изменить интервал
+/set_max [число] - изменить максимум файлов
+            """
+            await event.reply(text)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/set_interval'))
+        async def set_interval_handler(event):
+            """Установка интервала"""
+            try:
+                parts = event.text.split()
+                if len(parts) < 2:
+                    await event.reply("❌ Использование: /set_interval [секунды]")
+                    return
+                
+                interval = int(parts[1])
+                if interval < 1:
+                    await event.reply("❌ Интервал должен быть не менее 1 секунды")
+                    return
+                
+                self.update_setting('interval', interval)
+                await event.reply(f"✅ Интервал установлен: {interval} секунд")
+                
+            except ValueError:
+                await event.reply("❌ Введите число")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/set_max'))
+        async def set_max_handler(event):
+            """Установка максимального количества файлов"""
+            try:
+                parts = event.text.split()
+                if len(parts) < 2:
+                    await event.reply("❌ Использование: /set_max [число]")
+                    return
+                
+                max_files = int(parts[1])
+                if max_files < 1:
+                    await event.reply("❌ Количество должно быть не менее 1")
+                    return
+                
+                self.update_setting('max_files', max_files)
+                await event.reply(f"✅ Максимум файлов установлен: {max_files}")
+                
+            except ValueError:
+                await event.reply("❌ Введите число")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/transfer'))
+        async def transfer_handler(event):
+            """Начало пересылки"""
+            user_id = event.sender_id
+            channels = self.get_channels()
+            
+            if not channels:
+                await event.reply("❌ Сначала добавьте каналы")
+                return
+            
+            if user_id in self.transfer_tasks:
+                await event.reply("❌ Пересылка уже запущена")
+                return
+            
+            # Запускаем пересылку
+            task = asyncio.create_task(self.start_file_transfer(event, user_id))
+            self.transfer_tasks[user_id] = task
+            
+            await event.reply("🔄 Запускаю пересылку файлов...")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/stop'))
+        async def stop_handler(event):
+            """Остановка пересылки"""
+            user_id = event.sender_id
+            
+            if user_id in self.transfer_tasks:
+                self.transfer_tasks[user_id].cancel()
+                del self.transfer_tasks[user_id]
+                await event.reply("⏹️ Пересылка остановлена")
+            else:
+                await event.reply("❌ Пересылка не запущена")
         
         @self.bot_client.on(events.CallbackQuery)
         async def callback_handler(event):
-            user_id = event.sender_id
+            """Обработчик inline кнопок"""
             data = event.data.decode('utf-8')
+            user_id = event.sender_id
             
-            if data == "show_complaint_form":
-                stats = await self.get_user_stats(user_id)
-                if stats['remaining'] <= 0:
-                    minutes_left = int(stats['remaining_time'] // 60)
-                    await event.answer(f"Лимит исчерпан! Ждите {minutes_left} мин", alert=True)
-                    return
-                
-                complaint_text = """
-Введите username или user_id пользователя:
-
-Примеры:
-@username 
-123456789
-username
-                """
-                await event.edit(complaint_text)
-                
-            elif data == "show_stats":
-                await stats_handler(event)
-            
-            elif data.startswith("complaint_"):
-                target_username = data.replace("complaint_", "")
-                await self.send_complaint_animation(event, user_id, target_username)
+            if data == "add_channel":
+                await add_channel_handler(event)
+            elif data == "list_channels":
+                await list_channels_handler(event)
+            elif data == "settings":
+                await settings_handler(event)
+            elif data == "start_transfer":
+                await transfer_handler(event)
         
         @self.bot_client.on(events.NewMessage)
         async def message_handler(event):
-            user_id = event.sender_id
+            """Обработчик обычных сообщений"""
             text = event.text.strip()
             
             if text.startswith('/'):
                 return
             
-            stats = await self.get_user_stats(user_id)
-            if stats['remaining'] <= 0:
-                minutes_left = int(stats['remaining_time'] // 60)
-                await event.reply(f"Лимит исчерпан! Подождите {minutes_left} минут")
+            # Обработка добавления канала
+            if '->' in text:
+                await self.process_add_channel(event, text)
+    
+    async def process_add_channel(self, event, text):
+        """Обработка добавления канала"""
+        try:
+            parts = text.split('->')
+            if len(parts) != 2:
+                await event.reply("❌ Неверный формат. Используйте: источник -> назначение")
                 return
             
-            if self.is_valid_input(text):
-                await self.process_user_check(event, text, user_id)
-            else:
-                await event.reply("Неверный формат. Введите @username или user_id")
-    
-    def is_valid_input(self, text):
-        """Проверяет валидность ввода"""
-        if text.startswith('@'):
-            return len(text) <= 33 and text[1:].replace('_', '').isalnum()
-        elif text.isdigit():
-            return len(text) >= 5 and len(text) <= 15
-        else:
-            return len(text) <= 32 and text.replace('_', '').isalnum()
-    
-    async def process_user_check(self, event, input_text, user_id):
-        """Обрабатывает проверку пользователя"""
-        try:
-            clean_input = input_text.replace('@', '')
-            await event.reply(f"Проверяю {clean_input}...")
+            source = parts[0].strip()
+            destination = parts[1].strip()
             
-            try:
-                if clean_input.isdigit():
-                    user = await self.bot_client.get_entity(int(clean_input))
-                else:
-                    user = await self.bot_client.get_entity(clean_input)
-                
-                response = f"""
-Пользователь найден!
-
-Имя: {user.first_name or 'Не указано'}
-Фамилия: {user.last_name or 'Не указана'}
-Username: @{user.username or 'Не указан'}
-ID: {user.id}
-Тип: {'Бот' if user.bot else 'Пользователь'}
-                """
-                
-                buttons = [
-                    [Button.inline("Отправить жалобу", f"complaint_{clean_input}".encode())]
-                ]
-                
-                await event.reply(response, buttons=buttons)
-                
-            except Exception:
-                await event.reply(f"Пользователь {clean_input} не существует")
-                
-        except Exception as e:
-            await event.reply("Ошибка при проверке пользователя")
-            logger.error(f"Error in process_user_check: {e}")
-    
-    async def send_complaint_animation(self, event, user_id, target_username):
-        """Анимация отправки жалоб"""
-        try:
-            message = await event.edit("Начинаем отправку жалоб...")
+            # Сохраняем в базу
+            self.cursor.execute(
+                'INSERT OR REPLACE INTO channels (source_channel, destination_channel, added_time) VALUES (?, ?, ?)',
+                (source, destination, time.time())
+            )
+            self.conn.commit()
             
-            # Более медленная анимация прогресса
-            progress_data = [
-                ("▱▱▱▱▱", "0%"),
-                ("▰▱▱▱▱", "20%"),
-                ("▰▰▱▱▱", "40%"),
-                ("▰▰▰▱▱", "60%"),
-                ("▰▰▰▰▱", "80%"),
-                ("▰▰▰▰▰", "100%")
-            ]
-            
-            for progress_bar, percentage in progress_data:
-                await asyncio.sleep(3)  # Увеличил задержку до 3 секунд
-                await message.edit(f"Отправка жалоб...\n{progress_bar} {percentage}")
-            
-            # Генерируем результаты
-            total_complaints = random.randint(250, 300)
-            successful = total_complaints
-            failed = 0
-            
-            if random.random() < 0.12:
-                failed = random.randint(1, total_complaints // 8)
-                successful = total_complaints - failed
-            
-            # Финальный результат без лишней информации
-            result_text = f"""
-Жалобы отправлены!
-
-༼ つ ◕_◕ ༽つ Отправлено: {successful}
-¯\_(ツ)_/¯ Не отправлено: {failed}
-
-Цель: @{target_username}
-            """
-            
-            await message.edit(result_text)
-            
-            # Увеличиваем счетчик ТОЛЬКО после отправки жалоб
-            await self.increment_request_count(user_id)
+            await event.reply(f"✅ Канал добавлен:\n{source} → {destination}")
             
         except Exception as e:
-            logger.error(f"Error in complaint animation: {e}")
-            await event.answer("Ошибка при отправке жалоб", alert=True)
+            await event.reply(f"❌ Ошибка: {e}")
+    
+    def get_channels(self):
+        """Получить список каналов"""
+        self.cursor.execute('SELECT * FROM channels')
+        return self.cursor.fetchall()
+    
+    def get_settings(self):
+        """Получить настройки"""
+        self.cursor.execute('SELECT * FROM settings WHERE id = 1')
+        result = self.cursor.fetchone()
+        return {'interval': result[1], 'max_files': result[2]}
+    
+    def update_setting(self, setting, value):
+        """Обновить настройку"""
+        self.cursor.execute(f'UPDATE settings SET {setting} = ? WHERE id = 1', (value,))
+        self.conn.commit()
+    
+    def is_allowed_file(self, document):
+        """Проверить, разрешен ли файл"""
+        if not document or not hasattr(document, 'attributes'):
+            return False
+        
+        for attr in document.attributes:
+            if hasattr(attr, 'file_name'):
+                file_name = attr.file_name.lower()
+                return any(file_name.endswith(ext) for ext in self.allowed_extensions)
+        return False
+    
+    async def start_file_transfer(self, event, user_id):
+        """Запуск пересылки файлов"""
+        try:
+            channels = self.get_channels()
+            settings = self.get_settings()
+            
+            transferred_count = 0
+            
+            for channel in channels:
+                source = channel[1]
+                destination = channel[2]
+                
+                await event.reply(f"🔄 Начинаю пересылку из {source} в {destination}")
+                
+                try:
+                    # Получаем сообщения из исходного канала
+                    async for message in self.user_client.iter_messages(source):
+                        if transferred_count >= settings['max_files']:
+                            await event.reply(f"✅ Достигнут лимит в {settings['max_files']} файлов")
+                            return
+                        
+                        # Проверяем, что это файл и он разрешен
+                        if message.media and isinstance(message.media, MessageMediaDocument):
+                            document = message.media.document
+                            if self.is_allowed_file(document):
+                                
+                                # Пересылаем файл
+                                await self.user_client.send_message(destination, message)
+                                transferred_count += 1
+                                
+                                await event.reply(f"📁 Переслано файлов: {transferred_count}")
+                                
+                                # Ждем интервал
+                                await asyncio.sleep(settings['interval'])
+                
+                except Exception as e:
+                    await event.reply(f"❌ Ошибка в канале {source}: {e}")
+                    continue
+            
+            await event.reply(f"✅ Пересылка завершена! Всего файлов: {transferred_count}")
+            
+        except asyncio.CancelledError:
+            await event.reply("⏹️ Пересылка прервана пользователем")
+        except Exception as e:
+            await event.reply(f"❌ Ошибка пересылки: {e}")
+        finally:
+            if user_id in self.transfer_tasks:
+                del self.transfer_tasks[user_id]
     
     async def run(self):
         """Запуск бота"""
         await self.initialize()
-        logger.info("Бот запущен и готов к работе")
+        logger.info("File Transfer Bot запущен и готов к работе")
+        
+        me = await self.bot_client.get_me()
+        logger.info(f"Бот @{me.username} успешно запущен!")
+        
         await self.bot_client.run_until_disconnected()
 
 # Запуск бота
 if __name__ == '__main__':
-    bot = ComplaintBot()
+    bot = FileTransferBot()
     
     try:
         asyncio.run(bot.run())
