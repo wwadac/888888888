@@ -18,6 +18,7 @@ class FileTransferBot:
         self.setup_database()
         self.allowed_extensions = ['.zip', '.rar', '.py']
         self.transfer_tasks = {}
+        self.waiting_for_channel = {}  # Для пошагового добавления каналов
     
     def setup_database(self):
         """Настройка базы данных"""
@@ -70,54 +71,36 @@ class FileTransferBot:
 /add_channel - Добавить канал
 /list_channels - Список каналов  
 /settings - Настройки
+/transfer - Начать пересылку
 /help - Помощь
             """
-            await event.reply(menu_text)
-        
-        @self.bot_client.on(events.NewMessage(pattern='/help'))
-        async def help_handler(event):
-            help_text = """
-📖 Помощь по боту
-
-Для работы бота нужно:
-1. Добавить каналы командой /add_channel
-2. Настроить интервал /settings
-3. Бот будет работать от своего имени
-
-Форматы каналов:
-@username
--100123456789
-https://t.me/channelname
-
-Пример добавления:
-/add_channel @source @destination
-            """
-            await event.reply(help_text)
+            buttons = [
+                [Button.inline("➕ Добавить канал", b"add_channel_menu")],
+                [Button.inline("📋 Список каналов", b"list_channels")],
+                [Button.inline("⚙️ Настройки", b"show_settings")]
+            ]
+            await event.reply(menu_text, buttons=buttons)
         
         @self.bot_client.on(events.NewMessage(pattern='/add_channel'))
         async def add_channel_handler(event):
-            try:
-                parts = event.text.split()
-                if len(parts) < 3:
-                    await event.reply("Использование: /add_channel @source @destination")
-                    return
-                
-                source = parts[1]
-                destination = parts[2]
-                
-                self.cursor.execute(
-                    'INSERT OR REPLACE INTO channels (source_channel, destination_channel, added_time) VALUES (?, ?, ?)',
-                    (source, destination, time.time())
-                )
-                self.conn.commit()
-                
-                await event.reply(f"✅ Канал добавлен:\n{source} → {destination}")
-                
-            except Exception as e:
-                await event.reply(f"❌ Ошибка: {e}")
+            """Начинаем процесс добавления канала"""
+            user_id = event.sender_id
+            self.waiting_for_channel[user_id] = 'waiting_source'
+            
+            await event.reply("""
+📥 Добавление канала
+
+Шаг 1/2: Отправьте исходный канал (откуда брать файлы)
+
+Можно в формате:
+@username
+-1002550241842
+https://t.me/channelname
+            """)
         
         @self.bot_client.on(events.NewMessage(pattern='/list_channels'))
         async def list_channels_handler(event):
+            """Список каналов"""
             channels = self.get_channels()
             if not channels:
                 await event.reply("❌ Каналы не добавлены")
@@ -131,6 +114,7 @@ https://t.me/channelname
         
         @self.bot_client.on(events.NewMessage(pattern='/settings'))
         async def settings_handler(event):
+            """Настройки бота"""
             settings = self.get_settings()
             text = f"""
 ⚙️ Настройки бота
@@ -146,6 +130,7 @@ https://t.me/channelname
         
         @self.bot_client.on(events.NewMessage(pattern='/set_interval'))
         async def set_interval_handler(event):
+            """Установка интервала"""
             try:
                 parts = event.text.split()
                 if len(parts) < 2:
@@ -165,6 +150,7 @@ https://t.me/channelname
         
         @self.bot_client.on(events.NewMessage(pattern='/set_max'))
         async def set_max_handler(event):
+            """Установка максимального количества файлов"""
             try:
                 parts = event.text.split()
                 if len(parts) < 2:
@@ -182,10 +168,107 @@ https://t.me/channelname
             except ValueError:
                 await event.reply("Введите число")
         
-        @self.bot_client.on(events.NewMessage(pattern='/test'))
-        async def test_handler(event):
-            """Тестовая команда для проверки работы"""
-            await event.reply("🤖 Бот работает корректно!")
+        @self.bot_client.on(events.NewMessage(pattern='/transfer'))
+        async def transfer_handler(event):
+            """Начать пересылку"""
+            channels = self.get_channels()
+            if not channels:
+                await event.reply("❌ Сначала добавьте каналы через /add_channel")
+                return
+            
+            await event.reply("🔄 Пересылка файлов... (функция в разработке)")
+            # Здесь будет код пересылки файлов
+        
+        @self.bot_client.on(events.CallbackQuery)
+        async def callback_handler(event):
+            """Обработчик inline кнопок"""
+            data = event.data.decode('utf-8')
+            user_id = event.sender_id
+            
+            if data == "add_channel_menu":
+                await add_channel_handler(event)
+            elif data == "list_channels":
+                await list_channels_handler(event)
+            elif data == "show_settings":
+                await settings_handler(event)
+        
+        @self.bot_client.on(events.NewMessage)
+        async def message_handler(event):
+            """Обработчик обычных сообщений для пошагового добавления каналов"""
+            user_id = event.sender_id
+            text = event.text.strip()
+            
+            if text.startswith('/'):
+                return
+            
+            # Проверяем, находится ли пользователь в процессе добавления канала
+            if user_id in self.waiting_for_channel:
+                step = self.waiting_for_channel[user_id]
+                
+                if step == 'waiting_source':
+                    # Сохраняем исходный канал и запрашиваем целевой
+                    source_channel = self.clean_channel_input(text)
+                    self.waiting_for_channel[user_id] = {
+                        'step': 'waiting_destination',
+                        'source': source_channel
+                    }
+                    
+                    await event.reply(f"""
+✅ Исходный канал: {source_channel}
+
+Шаг 2/2: Отправьте целевой канал (куда пересылать файлы)
+
+Формат:
+@username  
+-1002550241842
+https://t.me/channelname
+                    """)
+                
+                elif step['step'] == 'waiting_destination':
+                    # Сохраняем целевой канал в базу
+                    destination_channel = self.clean_channel_input(text)
+                    source_channel = step['source']
+                    
+                    try:
+                        self.cursor.execute(
+                            'INSERT OR REPLACE INTO channels (source_channel, destination_channel, added_time) VALUES (?, ?, ?)',
+                            (source_channel, destination_channel, time.time())
+                        )
+                        self.conn.commit()
+                        
+                        await event.reply(f"""
+✅ Канал успешно добавлен!
+
+📥 Источник: {source_channel}
+📤 Назначение: {destination_channel}
+
+Теперь можно начать пересылку файлов командой /transfer
+                        """)
+                        
+                    except Exception as e:
+                        await event.reply(f"❌ Ошибка при добавлении канала: {e}")
+                    
+                    # Очищаем состояние пользователя
+                    if user_id in self.waiting_for_channel:
+                        del self.waiting_for_channel[user_id]
+    
+    def clean_channel_input(self, text):
+        """Очищает ввод канала от лишних символов"""
+        # Убираем пробелы
+        text = text.strip()
+        
+        # Если это URL, извлекаем username
+        if 't.me/' in text:
+            if text.startswith('https://t.me/'):
+                text = '@' + text.split('https://t.me/')[-1]
+            elif text.startswith('t.me/'):
+                text = '@' + text.split('t.me/')[-1]
+        
+        # Убираем @ если их несколько
+        if text.startswith('@@'):
+            text = '@' + text[2:]
+        
+        return text
     
     def get_channels(self):
         self.cursor.execute('SELECT * FROM channels')
