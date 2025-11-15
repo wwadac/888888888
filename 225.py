@@ -3,7 +3,7 @@ import logging
 import time
 import random
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from telethon import TelegramClient, events, Button
 
 # Настройка логирования
@@ -28,8 +28,7 @@ class ComplaintBot:
             CREATE TABLE IF NOT EXISTS user_requests (
                 user_id INTEGER PRIMARY KEY,
                 request_count INTEGER DEFAULT 0,
-                last_reset_time REAL,
-                last_request_time REAL
+                last_reset_time REAL
             )
         ''')
         self.conn.commit()
@@ -38,7 +37,6 @@ class ComplaintBot:
         """Проверяет лимит запросов для пользователя"""
         now = time.time()
         
-        # Получаем данные пользователя
         self.cursor.execute(
             'SELECT request_count, last_reset_time FROM user_requests WHERE user_id = ?',
             (user_id,)
@@ -46,36 +44,47 @@ class ComplaintBot:
         result = self.cursor.fetchone()
         
         if not result:
-            # Новый пользователь
-            self.cursor.execute(
-                'INSERT INTO user_requests (user_id, request_count, last_reset_time, last_request_time) VALUES (?, ?, ?, ?)',
-                (user_id, 1, now, now)
-            )
-            self.conn.commit()
-            return True, 4  # Осталось запросов
+            return True, 5
         
         request_count, last_reset_time = result
         
-        # Проверяем, прошло ли 40 минут
-        if now - last_reset_time >= 2400:  # 40 минут в секундах
-            # Сбрасываем счетчик
-            self.cursor.execute(
-                'UPDATE user_requests SET request_count = 1, last_reset_time = ?, last_request_time = ? WHERE user_id = ?',
-                (now, now, user_id)
-            )
-            self.conn.commit()
-            return True, 4
+        if now - last_reset_time >= 2400:
+            return True, 5
         else:
             if request_count >= 5:
                 return False, 0
             else:
-                # Увеличиваем счетчик
+                return True, 5 - request_count
+    
+    async def increment_request_count(self, user_id):
+        """Увеличивает счетчик запросов"""
+        now = time.time()
+        
+        self.cursor.execute(
+            'SELECT request_count, last_reset_time FROM user_requests WHERE user_id = ?',
+            (user_id,)
+        )
+        result = self.cursor.fetchone()
+        
+        if not result:
+            self.cursor.execute(
+                'INSERT INTO user_requests (user_id, request_count, last_reset_time) VALUES (?, ?, ?)',
+                (user_id, 1, now)
+            )
+        else:
+            request_count, last_reset_time = result
+            if now - last_reset_time >= 2400:
                 self.cursor.execute(
-                    'UPDATE user_requests SET request_count = request_count + 1, last_request_time = ? WHERE user_id = ?',
+                    'UPDATE user_requests SET request_count = 1, last_reset_time = ? WHERE user_id = ?',
                     (now, user_id)
                 )
-                self.conn.commit()
-                return True, 4 - request_count
+            else:
+                self.cursor.execute(
+                    'UPDATE user_requests SET request_count = request_count + 1 WHERE user_id = ?',
+                    (user_id,)
+                )
+        
+        self.conn.commit()
     
     async def get_remaining_time(self, user_id):
         """Получает оставшееся время до сброса"""
@@ -88,9 +97,27 @@ class ComplaintBot:
         if result:
             last_reset_time = result[0]
             elapsed = time.time() - last_reset_time
-            remaining = max(0, 2400 - elapsed)  # 40 минут - прошедшее время
+            remaining = max(0, 2400 - elapsed)
             return remaining
         return 0
+    
+    async def get_user_stats(self, user_id):
+        """Получает статистику пользователя"""
+        self.cursor.execute(
+            'SELECT request_count, last_reset_time FROM user_requests WHERE user_id = ?',
+            (user_id,)
+        )
+        result = self.cursor.fetchone()
+        
+        if result:
+            request_count, last_reset_time = result
+            remaining_time = await self.get_remaining_time(user_id)
+            return {
+                'used': request_count,
+                'remaining': max(0, 5 - request_count),
+                'remaining_time': remaining_time
+            }
+        return {'used': 0, 'remaining': 5, 'remaining_time': 0}
     
     async def initialize(self):
         """Инициализация бота"""
@@ -110,27 +137,19 @@ class ComplaintBot:
         @self.bot_client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
             user_id = event.sender_id
-            allowed, remaining = await self.check_user_limit(user_id)
+            stats = await self.get_user_stats(user_id)
             
             welcome_text = f"""
-🤖 **User Checker & Complaint Bot**
+User Checker & Complaint Bot
 
-⚠️ **Внимание!** У вас только **5 запросов** в течение **40 минут**
+У вас {stats['remaining']}/5 запросов
 
-📊 **Статус:** {f"✅ Доступно запросов: {remaining}" if allowed else "❌ Лимит исчерпан"}
-
-**Доступные команды:**
-• Просто отправьте @username или user_id
-• /check - Проверить пользователя
-• /stats - Ваша статистика
-• /help - Помощь
-
-🎯 **Отправьте username для проверки:**
+Отправьте @username или user_id для проверки
             """
             
             buttons = [
-                [Button.inline("📝 Отправить жалобу", b"show_complaint_form")],
-                [Button.inline("📊 Моя статистика", b"show_stats")]
+                [Button.inline("Отправить жалобу", b"show_complaint_form")],
+                [Button.inline("Моя статистика", b"show_stats")]
             ]
             
             await event.reply(welcome_text, buttons=buttons)
@@ -138,31 +157,18 @@ class ComplaintBot:
         @self.bot_client.on(events.NewMessage(pattern='/stats'))
         async def stats_handler(event):
             user_id = event.sender_id
-            remaining_time = await self.get_remaining_time(user_id)
+            stats = await self.get_user_stats(user_id)
             
-            self.cursor.execute(
-                'SELECT request_count FROM user_requests WHERE user_id = ?',
-                (user_id,)
-            )
-            result = self.cursor.fetchone()
+            minutes_left = int(stats['remaining_time'] // 60)
+            seconds_left = int(stats['remaining_time'] % 60)
             
-            if result:
-                used_requests = result[0]
-                remaining_requests = max(0, 5 - used_requests)
-                minutes_left = int(remaining_time // 60)
-                seconds_left = int(remaining_time % 60)
-                
-                stats_text = f"""
-📊 **Ваша статистика:**
+            stats_text = f"""
+Статистика:
 
-✅ Использовано запросов: {used_requests}/5
-⏰ Оставшееся время: {minutes_left}мин {seconds_left}сек
-🔄 Сброс через: {minutes_left} минут
-
-💡 Лимит обновляется каждые 40 минут
-                """
-            else:
-                stats_text = "📊 У вас еще не было запросов"
+Использовано: {stats['used']}/5
+Осталось: {stats['remaining']}
+Сброс через: {minutes_left}мин {seconds_left}сек
+            """
             
             await event.reply(stats_text)
         
@@ -172,25 +178,19 @@ class ComplaintBot:
             data = event.data.decode('utf-8')
             
             if data == "show_complaint_form":
-                # Проверяем лимит
-                allowed, remaining = await self.check_user_limit(user_id)
-                if not allowed:
-                    remaining_time = await self.get_remaining_time(user_id)
-                    minutes_left = int(remaining_time // 60)
-                    await event.answer(f"❌ Лимит исчерпан! Ждите {minutes_left} мин", alert=True)
+                stats = await self.get_user_stats(user_id)
+                if stats['remaining'] <= 0:
+                    minutes_left = int(stats['remaining_time'] // 60)
+                    await event.answer(f"Лимит исчерпан! Ждите {minutes_left} мин", alert=True)
                     return
                 
                 complaint_text = """
-📝 **Форма отправки жалобы**
+Введите username или user_id пользователя:
 
-Введите username или user_id пользователя для проверки и отправки жалобы:
-
-**Примеры:**
-• `@username` 
-• `123456789` (user_id)
-• `username` (без @)
-
-⬇️ **Отправьте username/user_id ниже:**
+Примеры:
+@username 
+123456789
+username
                 """
                 await event.edit(complaint_text)
                 
@@ -206,23 +206,19 @@ class ComplaintBot:
             user_id = event.sender_id
             text = event.text.strip()
             
-            # Игнорируем команды
             if text.startswith('/'):
                 return
             
-            # Проверяем лимит
-            allowed, remaining = await self.check_user_limit(user_id)
-            if not allowed:
-                remaining_time = await self.get_remaining_time(user_id)
-                minutes_left = int(remaining_time // 60)
-                await event.reply(f"❌ **Лимит исчерпан!**\nПодождите {minutes_left} минут до сброса")
+            stats = await self.get_user_stats(user_id)
+            if stats['remaining'] <= 0:
+                minutes_left = int(stats['remaining_time'] // 60)
+                await event.reply(f"Лимит исчерпан! Подождите {minutes_left} минут")
                 return
             
-            # Проверяем, похоже ли на username или ID
             if self.is_valid_input(text):
                 await self.process_user_check(event, text, user_id)
             else:
-                await event.reply("❌ Неверный формат. Введите @username или user_id")
+                await event.reply("Неверный формат. Введите @username или user_id")
     
     def is_valid_input(self, text):
         """Проверяет валидность ввода"""
@@ -237,120 +233,88 @@ class ComplaintBot:
         """Обрабатывает проверку пользователя"""
         try:
             clean_input = input_text.replace('@', '')
-            await event.reply(f"🔍 Проверяю `{clean_input}`...")
+            await event.reply(f"Проверяю {clean_input}...")
             
-            # Пытаемся получить информацию о пользователе
             try:
                 if clean_input.isdigit():
                     user = await self.bot_client.get_entity(int(clean_input))
                 else:
                     user = await self.bot_client.get_entity(clean_input)
                 
-                # Пользователь найден
-                user_type = "🤖 Бот" if user.bot else "👤 Пользователь"
                 response = f"""
-✅ **Пользователь найден!**
+Пользователь найден!
 
-**👤 Имя:** {user.first_name or 'Не указано'}
-**📝 Фамилия:** {user.last_name or 'Не указана'}
-**🎯 Username:** @{user.username or 'Не указан'}
-**🆔 ID:** `{user.id}`
-**📊 Тип:** {user_type}
+Имя: {user.first_name or 'Не указано'}
+Фамилия: {user.last_name or 'Не указана'}
+Username: @{user.username or 'Не указан'}
+ID: {user.id}
+Тип: {'Бот' if user.bot else 'Пользователь'}
                 """
                 
-                # Кнопка для отправки жалобы
                 buttons = [
-                    [Button.inline("🚨 Отправить жалобу", f"complaint_{clean_input}".encode())]
+                    [Button.inline("Отправить жалобу", f"complaint_{clean_input}".encode())]
                 ]
                 
                 await event.reply(response, buttons=buttons)
                 
-            except Exception as e:
-                await event.reply(f"❌ Пользователь `{clean_input}` не существует или аккаунт приватный")
-                logger.error(f"Error checking {clean_input}: {e}")
+            except Exception:
+                await event.reply(f"Пользователь {clean_input} не существует")
                 
         except Exception as e:
-            await event.reply("❌ Произошла ошибка при проверке пользователя")
+            await event.reply("Ошибка при проверке пользователя")
             logger.error(f"Error in process_user_check: {e}")
     
     async def send_complaint_animation(self, event, user_id, target_username):
         """Анимация отправки жалоб"""
         try:
-            # Этапы анимации
-            stages = [
-                "🔄 Подготавливаем базу данных жалоб...",
-                "📡 Устанавливаем соединение с серверами Telegram...",
-                "🔍 Анализируем профиль пользователя...",
-                "📝 Формируем пакеты жалоб...",
-                "🚀 Начинаем отправку жалоб..."
+            message = await event.edit("Начинаем отправку жалоб...")
+            
+            # Более медленная анимация прогресса
+            progress_data = [
+                ("▱▱▱▱▱", "0%"),
+                ("▰▱▱▱▱", "20%"),
+                ("▰▰▱▱▱", "40%"),
+                ("▰▰▰▱▱", "60%"),
+                ("▰▰▰▰▱", "80%"),
+                ("▰▰▰▰▰", "100%")
             ]
             
-            message = await event.edit("⏳ **Начинаем процесс отправки жалоб...**")
-            
-            # Проходим этапы подготовки
-            for stage in stages:
-                await asyncio.sleep(2)
-                await message.edit(f"⏳ {stage}")
+            for progress_bar, percentage in progress_data:
+                await asyncio.sleep(3)  # Увеличил задержку до 3 секунд
+                await message.edit(f"Отправка жалоб...\n{progress_bar} {percentage}")
             
             # Генерируем результаты
             total_complaints = random.randint(250, 300)
             successful = total_complaints
             failed = 0
             
-            # 12% шанс на ошибки
             if random.random() < 0.12:
                 failed = random.randint(1, total_complaints // 8)
                 successful = total_complaints - failed
             
-            # Анимация прогресса
-            progress_stages = [
-                ("▰▱▱▱▱▱▱▱▱", "10%"),
-                ("▰▰▰▱▱▱▱▱▱", "30%"),
-                ("▰▰▰▰▰▰▱▱▱", "60%"),
-                ("▰▰▰▰▰▰▰▰▰▱", "90%"),
-                ("▰▰▰▰▰▰▰▰▰▰", "100%")
-            ]
-            
-            for progress_bar, percentage in progress_stages:
-                await asyncio.sleep(1.5)
-                await message.edit(f"📤 **Отправка жалоб...**\n{progress_bar} {percentage}")
-            
-            # Финальный результат
+            # Финальный результат без лишней информации
             result_text = f"""
-✅ **Жалобы успешно отправлены!**
+Жалобы отправлены!
 
-📊 **Результаты отправки:**
-• 📨 Отправлено: {successful}
-• ❌ Не отправлено: {failed}
-• 📊 Эффективность: {((successful/total_complaints)*100):.1f}%
+༼ つ ◕_◕ ༽つ Отправлено: {successful}
+¯\_(ツ)_/¯ Не отправлено: {failed}
 
-🎯 **Цель:** @{target_username}
-⏰ **Время:** {datetime.now().strftime('%H:%M:%S')}
-
-⚠️ Жалобы будут обработаны в течение 24 часов
+Цель: @{target_username}
             """
             
             await message.edit(result_text)
             
-            # Обновляем счетчик запросов
-            self.cursor.execute(
-                'UPDATE user_requests SET request_count = request_count + 1 WHERE user_id = ?',
-                (user_id,)
-            )
-            self.conn.commit()
+            # Увеличиваем счетчик ТОЛЬКО после отправки жалоб
+            await self.increment_request_count(user_id)
             
         except Exception as e:
             logger.error(f"Error in complaint animation: {e}")
-            await event.answer("❌ Ошибка при отправке жалоб", alert=True)
+            await event.answer("Ошибка при отправке жалоб", alert=True)
     
     async def run(self):
         """Запуск бота"""
         await self.initialize()
         logger.info("Бот запущен и готов к работе")
-        
-        me = await self.bot_client.get_me()
-        logger.info(f"Бот @{me.username} успешно запущен!")
-        
         await self.bot_client.run_until_disconnected()
 
 # Запуск бота
