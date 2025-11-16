@@ -4,14 +4,15 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon import functions, types
 import sqlite3
-import os
+import re
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Конфигурация
+# КОНФИГУРАЦИЯ - ЗАПОЛНИТЕ СВОИ ДАННЫЕ!
 API_ID = "29385016  "  # Получите на my.telegram.org
 API_HASH = "3c57df8805ab5de5a23a032ed39b9af9"  # Получите на my.telegram.org
 BOT_TOKEN = "8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk"  # Получите у @BotFather
@@ -19,7 +20,7 @@ BOT_TOKEN = "8324933170:AAFatQ1T42ZJ70oeWS2UJkcXFeiwUFCIXAk"  # Получите
 # Инициализация бота
 bot = Client("account_manager", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# База данных для хранения сессий
+# База данных
 def init_db():
     conn = sqlite3.connect('sessions.db')
     cursor = conn.cursor()
@@ -36,6 +37,10 @@ def init_db():
     conn.close()
 
 init_db()
+
+# Хранилище состояний и данных авторизации
+user_states = {}
+auth_data = {}
 
 # Главное меню
 @bot.on_message(filters.command("start"))
@@ -65,60 +70,56 @@ async def add_account_callback(client, callback_query):
         "Пример: +79123456789"
     )
     
-    # Сохраняем состояние ожидания номера
     user_states[callback_query.from_user.id] = "waiting_phone"
 
 # Обработка ввода номера телефона
-user_states = {}
-
-@bot.on_message(filters.private & filters.text)
+@bot.on_message(filters.private & filters.text & ~filters.command("start"))
 async def handle_phone_input(client, message: Message):
     user_id = message.from_user.id
     
     if user_states.get(user_id) == "waiting_phone":
         phone = message.text.strip()
         
-        if not phone.startswith('+'):
+        if not re.match(r'^\+\d{10,15}$', phone):
             await message.reply_text("❌ Неверный формат номера. Используйте международный формат (+79123456789)")
             return
         
-        # Сохраняем номер и переходим к вводу кода
         user_states[user_id] = f"waiting_code_{phone}"
         
         await message.reply_text(
             f"📞 Номер: {phone}\n\n"
-            "Теперь запускаю авторизацию...\n"
+            "Запускаю авторизацию...\n"
             "Вам придет код подтверждения. Пришлите его сюда в формате: 12345"
         )
         
-        # Запускаем авторизацию
         await start_authorization(user_id, phone, message)
     
     elif "waiting_code_" in user_states.get(user_id, ""):
-        phone = user_states[user_id].split("_")[-1]
+        phone = user_states[user_id].split("_")[2]
         code = message.text.strip()
         
         try:
             await complete_authorization(user_id, phone, code, message)
         except Exception as e:
             await message.reply_text(f"❌ Ошибка: {str(e)}")
+    
+    elif "waiting_2fa_" in user_states.get(user_id, ""):
+        phone = user_states[user_id].split("_")[2]
+        password = message.text.strip()
         
-        # Очищаем состояние
-        if user_id in user_states:
-            del user_states[user_id]
+        try:
+            await complete_2fa(user_id, phone, password, message)
+        except Exception as e:
+            await message.reply_text(f"❌ Ошибка 2FA: {str(e)}")
 
 # Функция авторизации
 async def start_authorization(user_id, phone, message):
     try:
-        # Создаем клиент Telethon для авторизации
         client = TelegramClient(StringSession(), API_ID, API_HASH)
-        
         await client.connect()
         
-        # Отправляем код
         sent_code = await client.send_code_request(phone)
         
-        # Сохраняем данные для завершения авторизации
         auth_data[user_id] = {
             'client': client,
             'phone': phone,
@@ -130,9 +131,6 @@ async def start_authorization(user_id, phone, message):
     except Exception as e:
         await message.reply_text(f"❌ Ошибка при отправке кода: {str(e)}")
 
-# Данные для авторизации
-auth_data = {}
-
 # Завершение авторизации
 async def complete_authorization(user_id, phone, code, message):
     try:
@@ -143,14 +141,55 @@ async def complete_authorization(user_id, phone, code, message):
         
         client = data['client']
         
-        # Завершаем вход
+        try:
+            # Пытаемся войти с кодом
+            await client.sign_in(
+                phone=phone,
+                code=code,
+                phone_code_hash=data['phone_code_hash']
+            )
+        except Exception as e:
+            # Если требуется 2FA пароль
+            if "2FA" in str(e) or "PASSWORD" in str(e):
+                user_states[user_id] = f"waiting_2fa_{phone}"
+                await message.reply_text(
+                    "🔐 **Требуется двухфакторная аутентификация**\n\n"
+                    "Введите ваш 2FA пароль:"
+                )
+                return
+            else:
+                raise e
+        
+        # Если успешно вошли без 2FA
+        await save_session_and_info(user_id, client, phone, message)
+        
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка при авторизации: {str(e)}")
+
+# Завершение 2FA аутентификации
+async def complete_2fa(user_id, phone, password, message):
+    try:
+        data = auth_data.get(user_id)
+        if not data:
+            await message.reply_text("❌ Сессия авторизации устарела. Начните заново.")
+            return
+        
+        client = data['client']
+        
+        # Входим с 2FA паролем
         await client.sign_in(
             phone=phone,
-            code=code,
-            phone_code_hash=data['phone_code_hash']
+            password=password
         )
         
-        # Получаем строку сессии
+        await save_session_and_info(user_id, client, phone, message)
+        
+    except Exception as e:
+        await message.reply_text(f"❌ Ошибка при 2FA аутентификации: {str(e)}")
+
+# Сохранение сессии и информации
+async def save_session_and_info(user_id, client, phone, message):
+    try:
         session_string = client.session.save()
         
         # Сохраняем в базу данных
@@ -170,18 +209,21 @@ async def complete_authorization(user_id, phone, code, message):
             f"✅ **Аккаунт успешно добавлен!**\n\n"
             f"👤 Имя: {me.first_name or ''}\n"
             f"📱 Телефон: {phone}\n"
-            f"🔗 Username: @{me.username or 'нет'}\n\n"
-            f"ID аккаунта: {me.id}"
+            f"🔗 Username: @{me.username or 'нет'}\n"
+            f"🆔 ID: {me.id}\n"
+            f"🔐 2FA: {'Да' if me.premium else 'Нет'}"
         )
         
         await client.disconnect()
         
-        # Удаляем данные авторизации
+        # Очищаем данные
         if user_id in auth_data:
             del auth_data[user_id]
+        if user_id in user_states:
+            del user_states[user_id]
             
     except Exception as e:
-        await message.reply_text(f"❌ Ошибка при авторизации: {str(e)}")
+        await message.reply_text(f"❌ Ошибка при сохранении сессии: {str(e)}")
 
 # Показать мои аккаунты
 @bot.on_callback_query(filters.regex("my_accounts"))
@@ -209,7 +251,7 @@ async def show_accounts_callback(client, callback_query):
     
     await callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Управление конкретным аккаунтом
+# Управление аккаунтом
 @bot.on_callback_query(filters.regex(r"manage_\d+"))
 async def manage_account_callback(client, callback_query):
     account_id = int(callback_query.data.split("_")[1])
@@ -218,31 +260,28 @@ async def manage_account_callback(client, callback_query):
         [InlineKeyboardButton("✏️ Изменить имя", callback_data=f"change_name_{account_id}")],
         [InlineKeyboardButton("🔗 Изменить username", callback_data=f"change_username_{account_id}")],
         [InlineKeyboardButton("📝 Изменить био", callback_data=f"change_bio_{account_id}")],
-        [InlineKeyboardButton("🖼️ Изменить фото", callback_data=f"change_photo_{account_id}")],
         [InlineKeyboardButton("📊 Информация", callback_data=f"account_info_{account_id}")],
         [InlineKeyboardButton("🔙 Назад", callback_data="my_accounts")]
     ])
     
     await callback_query.message.edit_text(
-        "⚙️ **Управление аккаунтом**\n\n"
-        "Выберите действие:",
+        "⚙️ **Управление аккаунтом**\n\nВыберите действие:",
         reply_markup=keyboard
     )
 
-# Функция для получения клиента по ID аккаунта
+# Получение клиента по ID аккаунта
 async def get_client_by_account_id(account_id, user_id):
-    conn = sqlite3.connect('sessions.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT session_string FROM accounts WHERE id = ? AND user_id = ?", (account_id, user_id))
-    result = cursor.fetchone()
-    conn.close()
-    
-    if not result:
-        return None
-    
-    session_string = result[0]
-    
     try:
+        conn = sqlite3.connect('sessions.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT session_string FROM accounts WHERE id = ? AND user_id = ?", (account_id, user_id))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if not result:
+            return None
+        
+        session_string = result[0]
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
         await client.connect()
         
@@ -257,7 +296,6 @@ async def get_client_by_account_id(account_id, user_id):
 @bot.on_callback_query(filters.regex(r"change_name_\d+"))
 async def change_name_callback(client, callback_query):
     account_id = int(callback_query.data.split("_")[2])
-    
     user_states[callback_query.from_user.id] = f"change_first_name_{account_id}"
     
     await callback_query.message.edit_text(
@@ -267,7 +305,7 @@ async def change_name_callback(client, callback_query):
     )
 
 # Обработка изменения имени
-@bot.on_message(filters.private & filters.text)
+@bot.on_message(filters.private & filters.text & ~filters.command("start"))
 async def handle_name_change(client, message: Message):
     user_id = message.from_user.id
     state = user_states.get(user_id, "")
@@ -276,8 +314,8 @@ async def handle_name_change(client, message: Message):
         account_id = int(state.split("_")[3])
         names = message.text.strip().split(" ", 1)
         
-        if len(names) < 2:
-            await message.reply_text("❌ Пожалуйста, введите имя и фамилию через пробел")
+        if len(names) < 1:
+            await message.reply_text("❌ Пожалуйста, введите имя")
             return
         
         first_name = names[0]
@@ -300,53 +338,6 @@ async def handle_name_change(client, message: Message):
         except Exception as e:
             await message.reply_text(f"❌ Ошибка при изменении имени: {str(e)}")
         
-        # Очищаем состояние
-        if user_id in user_states:
-            del user_states[user_id]
-
-# Изменение username
-@bot.on_callback_query(filters.regex(r"change_username_\d+"))
-async def change_username_callback(client, callback_query):
-    account_id = int(callback_query.data.split("_")[2])
-    
-    user_states[callback_query.from_user.id] = f"change_username_{account_id}"
-    
-    await callback_query.message.edit_text(
-        "🔗 **Изменение username**\n\n"
-        "Введите новый username (без @):\n"
-        "Пример: ivan_ivanov\n\n"
-        "Для удаления username отправьте: удалить"
-    )
-
-# Обработка изменения username
-@bot.on_message(filters.private & filters.text)
-async def handle_username_change(client, message: Message):
-    user_id = message.from_user.id
-    state = user_states.get(user_id, "")
-    
-    if state.startswith("change_username_"):
-        account_id = int(state.split("_")[2])
-        username = message.text.strip().lower()
-        
-        client_instance = await get_client_by_account_id(account_id, user_id)
-        if not client_instance:
-            await message.reply_text("❌ Ошибка доступа к аккаунту")
-            return
-        
-        try:
-            if username == "удалить":
-                username = ""
-            
-            await client_instance(functions.account.UpdateUsernameRequest(username=username))
-            
-            action = "удален" if not username else f"изменен на @{username}"
-            await message.reply_text(f"✅ Username успешно {action}!")
-            await client_instance.disconnect()
-            
-        except Exception as e:
-            await message.reply_text(f"❌ Ошибка при изменении username: {str(e)}")
-        
-        # Очищаем состояние
         if user_id in user_states:
             del user_states[user_id]
 
@@ -373,8 +364,7 @@ async def account_info_callback(client, callback_query):
             f"📚 Фамилия: {me.last_name or ''}\n"
             f"🤖 Бот: {'Да' if me.bot else 'Нет'}\n"
             f"✅ Премиум: {'Да' if me.premium else 'Нет'}\n"
-            f"🔐 Верифицирован: {'Да' if me.verified else 'Нет'}\n"
-            f"🚫 Заблокирован: {'Да' if me.restricted else 'Нет'}"
+            f"🔐 2FA: {'Включена' if me.premium else 'Выключена'}"
         )
         
         keyboard = InlineKeyboardMarkup([
@@ -394,5 +384,7 @@ async def back_to_main_callback(client, callback_query):
 
 # Запуск бота
 if __name__ == "__main__":
-    print("Бот запущен...")
+    print("🤖 Бот запускается...")
+    print("✅ Pyrogram и Telethon инициализированы")
+    print("📱 Бот готов к работе!")
     bot.run()
