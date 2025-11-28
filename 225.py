@@ -17,12 +17,14 @@ logger = logging.getLogger(__name__)
 # Глобальные переменные для хранения данных авторизации
 user_sessions = {}
 
+# Токен бота (замените на свой)
+BOT_TOKEN = "7971014285:AAGe6IbdI7_dLHsn3UdGBER-wZRKK-buSys"
+
 async def init_bot():
     """Инициализация бота"""
-    bot_token = input("7971014285:AAGe6IbdI7_dLHsn3UdGBER-wZRKK-buSys")
     
     # Создаем клиент для бота
-    bot = TelegramClient('bot_session', 0, '').start(bot_token=bot_token)
+    bot = TelegramClient('bot_session', 0, '').start(bot_token=BOT_TOKEN)
     
     @bot.on(events.NewMessage(pattern='/start'))
     async def start_handler(event):
