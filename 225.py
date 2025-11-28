@@ -1,107 +1,122 @@
-import asyncio
-from telethon import TelegramClient, events
-import re
-import os
 import logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Включим логирование, чтобы видеть ошибки
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-# НАСТРОЙКИ
-API_ID = 29385016
-API_HASH = '3c57df8805ab5de5a23a032ed39b9af9'
-BOT_TOKEN = '7971014285:AAGe6IbdI7_dLHsn3UdGBER-wZRKK-buSys'
-USER_SESSION = 'user_account.session'
+# Ваш токен от BotFather
+API_TOKEN = '7971014285:AAGe6IbdI7_dLHsn3UdGBER-wZRKK-buSys'
 
-async def download_media(chat_identifier, message_id):
-    user_client = None
-    try:
-        user_client = TelegramClient(USER_SESSION, API_ID, API_HASH)
-        await user_client.start()
-        
-        message = await user_client.get_messages(chat_identifier, ids=message_id)
-        
-        if not message or not message.media:
-            return None, "Сообщение или медиа не найдено"
-        
-        os.makedirs("downloads", exist_ok=True)
-        file_path = await message.download_media(file="downloads/")
-        return file_path, "Успешно"
-        
-    except Exception as e:
-        logger.error(f"Ошибка скачивания: {e}")
-        return None, f"Ошибка: {str(e)}"
-    finally:
-        if user_client:
-            await user_client.disconnect()
+# ID администратора (узнать можно, написав боту /start, а затем посмотрев логи)
+ADMIN_CHAT_ID = 8191068380
 
-async def main():
-    bot_client = TelegramClient('bot', API_ID, API_HASH)
-    
-    @bot_client.on(events.NewMessage(pattern='/start'))
-    async def start(event):
-        await event.reply('''🤖 Бот для скачивания медиа из Telegram
+# Хранилище для состояний пользователей (в реальном проекте используйте БД)
+user_sessions = {}
 
-Отправь ссылку на сообщение в формате:
-https://t.me/username/123
-https://t.me/c/chat_id/123''')
+# Команда /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
 
-    @bot_client.on(events.NewMessage(pattern='/help'))
-    async def help_command(event):
-        await event.reply('''📖 Помощь:
-Просто отправьте ссылку на сообщение с медиафайлом
-Поддерживаемые форматы ссылок:
-• https://t.me/username/123
-• https://t.me/c/chat_id/123''')
+    # Это симуляция приветственного сообщения для нового пользователя
+    welcome_text = f"""
+    👋 Добро пожаловать, {user_name}!
 
-    @bot_client.on(events.NewMessage)
-    async def handle_message(event):
-        # Игнорируем команды
-        if event.text.startswith('/'):
-            return
-            
-        text = event.text
-        
-        if not text.startswith('https://t.me/'):
-            await event.reply("❌ Отправьте ссылку на сообщение в формате: https://t.me/username/123")
-            return
-            
-        pattern = r'https://t\.me/(c/(\d+)|(\w+))/(\d+)'
-        match = re.search(pattern, text)
-        
-        if not match:
-            await event.reply("❌ Неверный формат ссылки")
-            return
-        
-        if match.group(2):  # Формат c/chat_id
-            chat_identifier = int(match.group(2))
-            message_id = int(match.group(4))
-        else:  # Формат username
-            chat_identifier = match.group(3)
-            message_id = int(match.group(4))
-        
-        processing_msg = await event.reply('⏳ Скачиваю...')
-        
-        file_path, status = await download_media(chat_identifier, message_id)
-        
-        if file_path:
-            await processing_msg.edit('✅ Файл скачан! Отправляю...')
-            await bot_client.send_file(event.chat_id, file_path, caption="📁 Ваш файл")
-            try:
-                os.remove(file_path)
-            except Exception as e:
-                logger.error(f"Ошибка удаления файла: {e}")
-            await processing_msg.delete()
-        else:
-            await processing_msg.edit(f'❌ Ошибка: {status}')
+    Это тестовый бот для бизнес-аккаунта. Чем я могу вам помочь?
 
-    try:
-        await bot_client.start(bot_token=BOT_TOKEN)
-        logger.info("Бот успешно запущен!")
-        await bot_client.run_until_disconnected()
-    except Exception as e:
-        logger.error(f"Ошибка запуска бота: {e}")
+    *Доступные команды:*
+    /menu - Посмотреть наше меню (Быстрый ответ)
+    /price - Узнать прайс-лист
+    /operator - Связаться с живым оператором
+    """
+    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+
+    # Логируем нового пользователя
+    logging.info(f"Новый пользователь: {user_name} (ID: {user_id})")
+
+# Команда /menu (Быстрый ответ)
+async def quick_reply_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_text = """
+    🍽️ *Наше меню*
+
+    *Первые блюда*
+    • Борщ - 300 руб.
+    • Солянка - 350 руб.
+
+    *Вторые блюда*
+    • Стейк - 700 руб.
+    • Паста - 450 руб.
+
+    *Напитки*
+    • Кофе - 150 руб.
+    • Сок - 100 руб.
+
+    Выберите блюдо и напишите нам номер!
+    """
+    # Можно также прикрепить файл (menu.pdf)
+    # await update.message.reply_document(document=open('menu.pdf', 'rb'))
+    await update.message.reply_text(menu_text, parse_mode='Markdown')
+
+# Команда /price (Еще один быстрый ответ)
+async def quick_reply_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    price_text = "Спасибо за интерес! Актуальный прайс-лист во вложении."
+    await update.message.reply_text(price_text)
+    # Вместо этого можно отправить файл
+    # await update.message.reply_document(document=open('price.pdf', 'rb'))
+
+# Команда /operator
+async def call_operator(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+
+    # Сообщение пользователю
+    await update.message.reply_text("🔄 Ожидайте, мы соединяем вас с оператором...")
+
+    # Уведомление администратору
+    operator_text = f"🚨 *Запрос на связь с оператором!*\\nПользователь: {user_name} \\nID: `{user_id}`"
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=operator_text,
+        parse_mode='Markdown'
+    )
+
+# Обработка всех текстовых сообщений (основной AI/автоответчик)
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text.lower()
+    user_id = update.effective_user.id
+
+    # Простейший "искусственный интеллект" на основе ключевых слов
+    if any(word in user_message for word in ['цена', 'стоит', 'сколько']):
+        response = "Информацию о ценах вы можете посмотреть в нашем прайсе: /price"
+    elif any(word in user_message for word in ['меню', 'еда', 'блюд']):
+        response = "С нашим меню вы можете ознакомиться здесь: /menu"
+    elif any(word in user_message for word in ['оператор', 'человек', 'связь']):
+        response = "Чтобы связаться с оператором, используйте команду /operator"
+    elif any(word in user_message for word in ['привет', 'здравствуй', 'начать']):
+        response = "С возвращением! Чем я могу вам помочь? Используйте команды /menu или /price для быстрого доступа к информации."
+    else:
+        response = "Извините, я еще учусь. Пока я могу ответить на вопросы о ценах, меню или соединить с оператором. Попробуйте использовать команды из меню."
+
+    await update.message.reply_text(response)
+
+# Основная функция
+def main():
+    # Создаем приложение и передаем ему токен
+    application = Application.builder().token(API_TOKEN).build()
+
+    # Добавляем обработчики
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", quick_reply_menu))
+    application.add_handler(CommandHandler("price", quick_reply_price))
+    application.add_handler(CommandHandler("operator", call_operator))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Запускаем бота
+    application.run_polling()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
