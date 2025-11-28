@@ -9,9 +9,9 @@ CONFIG_FILE = 'config.json'
 
 async def save_config(api_id, api_hash, session_name='user_session'):
     config = {
-        'api_id': api_id,
-        'api_hash': api_hash,
-        'session_name': session_name
+        '29572248': api_id,
+        '342fcfe195eb0b629bb6951671b4e8a2': api_hash,
+        'user_account': session_name
     }
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f)
@@ -142,3 +142,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
