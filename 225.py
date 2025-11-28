@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue # Импортируем JobQueue
 from datetime import datetime, timedelta
 
 # --- 1. Настройки и Логирование ---
@@ -121,8 +121,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     """Запускает бота."""
-    # Создаем Application и включаем JobQueue
-    application = Application.builder().token(TOKEN).concurrent_updates(True).build()
+    # Создаем Application
+    # 1. Создаем JobQueue
+    job_queue = JobQueue()
+
+    # 2. Создаем Application, передавая JobQueue
+    application = Application.builder().token(TOKEN).concurrent_updates(True).job_queue(job_queue).build()
     
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start))
