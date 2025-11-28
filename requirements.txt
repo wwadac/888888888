@@ -1,2 +1,2 @@
-telethon==1.28.5
-asyncio
+python-telegram-bot==20.7
+python-dotenv==1.0.0
