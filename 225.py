@@ -1,145 +1,198 @@
-import asyncio
-from telethon import TelegramClient, events
-import re
 import os
-import json
+import logging
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+from telethon.tl.types import (
+    MessageMediaPhoto, 
+    MessageMediaDocument,
+    DocumentAttributeVideo,
+    DocumentAttributeAudio
+)
 
-# Файл для хранения конфигурации
-CONFIG_FILE = 'config.json'
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-async def save_config(api_id, api_hash, session_name='user_session'):
-    config = {
-        '29572248': api_id,
-        '342fcfe195eb0b629bb6951671b4e8a2': api_hash,
-        'user_account': session_name
-    }
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f)
-    return True
+# Глобальные переменные для хранения данных авторизации
+user_sessions = {}
 
-async def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return None
-
-async def setup_user_session(api_id, api_hash, session_name):
-    try:
-        client = TelegramClient(session_name, api_id, api_hash)
-        await client.start()
-        print("User session configured successfully!")
-        await client.disconnect()
-        return True
-    except Exception as e:
-        return False, str(e)
-
-async def download_media(chat_identifier, message_id):
-    config = await load_config()
-    if not config:
-        return None, "Конфигурация не настроена"
+async def init_bot():
+    """Инициализация бота"""
+    bot_token = input("7971014285:AAGe6IbdI7_dLHsn3UdGBER-wZRKK-buSys")
     
-    user_client = None
-    try:
-        user_client = TelegramClient(config['session_name'], config['api_id'], config['api_hash'])
-        await user_client.start()
-        
-        message = await user_client.get_messages(chat_identifier, ids=message_id)
-        
-        if not message or not message.media:
-            return None, "Сообщение или медиа не найдено"
-        
-        os.makedirs("downloads", exist_ok=True)
-        file_path = await message.download_media(file="downloads/")
-        return file_path, "Успешно"
-        
-    except Exception as e:
-        return None, f"Ошибка: {str(e)}"
-    finally:
-        if user_client:
-            await user_client.disconnect()
-
-async def main():
-    bot_client = TelegramClient('bot', 1234567, 'temp_hash')  # Временные данные
+    # Создаем клиент для бота
+    bot = TelegramClient('bot_session', 0, '').start(bot_token=bot_token)
     
-    @bot_client.on(events.NewMessage(pattern='/start'))
-    async def start(event):
-        config = await load_config()
-        if config:
-            await event.reply('Бот настроен. Отправь ссылку на сообщение для скачивания.')
-        else:
-            await event.reply('''Привет! Сначала настрой конфигурацию:
-            
-/setup API_ID API_HASH
-Пример: /setup 1234567 abcdef123456
-
-После настройки отправляй ссылки для скачивания.''')
-
-    @bot_client.on(events.NewMessage(pattern='/setup'))
-    async def setup_handler(event):
-        try:
-            args = event.text.split()
-            if len(args) != 3:
-                await event.reply('Использование: /setup API_ID API_HASH')
-                return
-            
-            api_id = int(args[1])
-            api_hash = args[2]
-            
-            success = await save_config(api_id, api_hash)
-            if success:
-                session_result = await setup_user_session(api_id, api_hash, 'user_session')
-                if session_result == True:
-                    await event.reply('✅ Конфигурация сохранена! Теперь отправляй ссылки для скачивания.')
-                else:
-                    await event.reply(f'❌ Ошибка настройки сессии: {session_result[1]}')
-            else:
-                await event.reply('❌ Ошибка сохранения конфигурации')
-                
-        except ValueError:
-            await event.reply('❌ API ID должен быть числом')
-        except Exception as e:
-            await event.reply(f'❌ Ошибка: {str(e)}')
-
-    @bot_client.on(events.NewMessage)
-    async def handle_message(event):
+    @bot.on(events.NewMessage(pattern='/start'))
+    async def start_handler(event):
+        """Обработчик команды /start"""
+        await event.reply(
+            "👋 Привет! Я бот для скачивания медиафайлов.\n\n"
+            "Для начала работы мне нужны твои данные авторизации Telegram.\n"
+            "Отправь /auth для начала авторизации"
+        )
+    
+    @bot.on(events.NewMessage(pattern='/auth'))
+    async def auth_handler(event):
+        """Обработчик команды авторизации"""
+        user_id = event.sender_id
+        user_sessions[user_id] = {'step': 'api_id'}
+        
+        await event.reply(
+            "🔐 Начинаем процесс авторизации:\n\n"
+            "1. Перейди на https://my.telegram.org\n"
+            "2. Войди в свой аккаунт\n"
+            "3. Перейди в раздел 'API Development Tools'\n"
+            "4. Создай приложение и получи API данные\n\n"
+            "Теперь введи свой API ID:"
+        )
+    
+    @bot.on(events.NewMessage)
+    async def message_handler(event):
+        """Обработчик всех сообщений"""
+        user_id = event.sender_id
         text = event.text
         
-        if text.startswith('/'):
+        if user_id not in user_sessions:
+            if not text.startswith('/'):
+                await event.reply("Для начала работы отправь /start")
             return
+        
+        session_data = user_sessions[user_id]
+        step = session_data.get('step')
+        
+        if step == 'api_id':
+            try:
+                api_id = int(text.strip())
+                session_data['api_id'] = api_id
+                session_data['step'] = 'api_hash'
+                await event.reply("✅ API ID принят. Теперь введи API Hash:")
+            except ValueError:
+                await event.reply("❌ Неверный API ID. Введи число:")
+        
+        elif step == 'api_hash':
+            api_hash = text.strip()
+            if len(api_hash) < 10:
+                await event.reply("❌ Неверный API Hash. Попробуй еще раз:")
+                return
             
-        if not text.startswith('https://t.me/'):
-            return
+            session_data['api_hash'] = api_hash
+            session_data['step'] = 'phone'
+            await event.reply(
+                "✅ API Hash принят. Теперь введи свой номер телефона в международном формате:\n"
+                "Пример: +79123456789"
+            )
+        
+        elif step == 'phone':
+            phone = text.strip()
+            session_data['phone'] = phone
             
-        config = await load_config()
-        if not config:
-            await event.reply('❌ Сначала настрой конфигурацию командой /setup')
-            return
+            try:
+                # Создаем клиент для пользователя
+                client = TelegramClient(
+                    StringSession(), 
+                    session_data['api_id'], 
+                    session_data['api_hash']
+                )
+                
+                await client.start(phone=phone)
+                
+                # Сохраняем сессию
+                session_string = client.session.save()
+                session_data['session_string'] = session_string
+                session_data['client'] = client
+                session_data['step'] = 'ready'
+                
+                await event.reply(
+                    "✅ Авторизация успешна! Теперь ты можешь скачивать медиафайлы.\n\n"
+                    "Просто пришли мне ссылку на сообщение с фото, видео, голосовым сообщением или видеокружком."
+                )
+                
+            except Exception as e:
+                await event.reply(f"❌ Ошибка авторизации: {str(e)}\nПопробуй снова с /auth")
+                del user_sessions[user_id]
+        
+        elif step == 'ready' and text.startswith('http'):
+            await download_media(event, session_data['client'])
+    
+    async def download_media(event, client):
+        """Скачивание медиафайла из сообщения"""
+        try:
+            url = event.text.strip()
+            await event.reply("⏳ Скачиваю медиафайл...")
             
-        pattern = r'https://t\.me/(c/(\d+)|(\w+))/(\d+)'
-        match = re.search(pattern, text)
-        
-        if not match:
-            await event.reply("❌ Неверный формат ссылки")
-            return
-        
-        chat_identifier = int(match.group(2)) if match.group(2) else match.group(3)
-        message_id = int(match.group(4))
-        
-        await event.reply('⏳ Скачиваю...')
-        file_path, status = await download_media(chat_identifier, message_id)
-        
-        if file_path:
-            await bot_client.send_file(event.chat_id, file_path, caption="✅ Скачанный файл")
-            os.remove(file_path)
-        else:
-            await event.reply(f'❌ {status}')
+            # Получаем информацию о сообщении из ссылки
+            message = await client.get_messages(url)
+            
+            if not message or not message.media:
+                await event.reply("❌ Не удалось найти медиафайл в указанном сообщении")
+                return
+            
+            # Скачиваем медиафайл
+            filename = await download_file(client, message.media)
+            
+            if filename:
+                # Отправляем файл пользователю
+                await event.reply("✅ Файл успешно скачан!")
+                await event.respond(file=filename)
+                
+                # Удаляем временный файл
+                os.remove(filename)
+            else:
+                await event.reply("❌ Не удалось скачать файл")
+                
+        except Exception as e:
+            logger.error(f"Error downloading media: {e}")
+            await event.reply(f"❌ Ошибка при скачивании: {str(e)}")
+    
+    async def download_file(client, media):
+        """Скачивание файла и возвращение имени файла"""
+        try:
+            if isinstance(media, MessageMediaPhoto):
+                filename = await client.download_media(media, file="downloads/photo_{}.jpg")
+            elif isinstance(media, MessageMediaDocument):
+                # Определяем тип документа
+                doc = media.document
+                attributes = doc.attributes
+                
+                for attr in attributes:
+                    if isinstance(attr, DocumentAttributeVideo):
+                        if attr.round_message:  # Видеокружок
+                            filename = await client.download_media(media, file="downloads/video_note_{}.mp4")
+                        else:  # Обычное видео
+                            filename = await client.download_media(media, file="downloads/video_{}.mp4")
+                        break
+                    elif isinstance(attr, DocumentAttributeAudio):
+                        if attr.voice:  # Голосовое сообщение
+                            filename = await client.download_media(media, file="downloads/voice_{}.ogg")
+                        else:  # Аудиофайл
+                            filename = await client.download_media(media, file="downloads/audio_{}.mp3")
+                        break
+                else:
+                    # Другие типы документов
+                    filename = await client.download_media(media, file="downloads/document_{}")
+            else:
+                return None
+                
+            return filename
+        except Exception as e:
+            logger.error(f"Error in download_file: {e}")
+            return None
+    
+    # Создаем папку для загрузок
+    os.makedirs('downloads', exist_ok=True)
+    
+    return bot
 
-    # Используем временный токен для запуска
-    BOT_TOKEN = '7971014285:AAGe6IbdI7_dLHsn3UdGBER-wZRKK-buSys'
-    await bot_client.start(bot_token=BOT_TOKEN)
-    print("Бот запущен...")
-    await bot_client.run_until_disconnected()
-
-if __name__ == '__main__':
-    asyncio.run(main())
-
+if __name__ == "__main__":
+    print("🤖 Инициализация Telegram бота...")
+    
+    # Запускаем бота
+    loop = asyncio.get_event_loop()
+    bot = loop.run_until_complete(init_bot())
+    
+    print("✅ Бот запущен!")
+    print("Отправь /start в Telegram для начала работы")
+    
+    # Запускаем бесконечный цикл
+    bot.run_until_disconnected()
