@@ -2,7 +2,7 @@ from telethon import TelegramClient, events
 import os
 from urllib.parse import urlparse
 
-api_id = 8000395560
+api_id = 29385016
 api_hash = '3c57df8805ab5de5a23a032ed39b9af9'
 bot_token = '7971014285:AAGe6IbdI7_dLHsn3UdGBER-wZRKK-buSys'
 
@@ -49,3 +49,4 @@ async def url_handler(event):
 
 client.start()
 client.run_until_disconnected()
+
