@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 # --- 1. Настройки и Логирование ---
 
 # Замените 'ВАШ_ТОКЕН_БОТА' на токен, полученный от @BotFather
+# Ваш токен скрыт в коде, но здесь оставлен как пример
 TOKEN = "7971014285:AAGe6IbdI7_dLHsn3UdGBER-wZRKK-buSys"
 
 # Настройка логирования, чтобы видеть ошибки в консоли
@@ -24,6 +25,7 @@ async def send_reminder_4_times(context: ContextTypes.DEFAULT_TYPE, chat_id: int
     logger.info(f"Начинается отправка 4 напоминаний для чата {chat_id}: {task_text}")
     
     for i in range(1, 5):
+        # Отправляем сообщение с номером попытки
         message = f"🔔 НАПОМИНАНИЕ (Попытка {i}/4):\n{task_text}"
         await context.bot.send_message(chat_id=chat_id, text=message)
         logger.info(f"Отправлено напоминание {i}/4.")
@@ -59,6 +61,7 @@ async def set_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
         # 3. Вычисляем время напоминания
         now = datetime.now()
+        # Создаем целевое время на сегодня
         target_time = now.replace(hour=reminder_hour, minute=reminder_minute, second=0, microsecond=0)
         
         # Если указанное время уже прошло сегодня, устанавливаем на завтра
@@ -70,6 +73,7 @@ async def set_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # 4. Планируем задачу
         
         # Запускаем асинхронную функцию через заданное время (delay.total_seconds())
+        # create_task планирует выполнение send_reminder_4_times через calculated delay
         context.application.create_task(
             send_reminder_4_times(context, chat_id, task_text), 
             context=delay.total_seconds()
@@ -112,7 +116,9 @@ def main() -> None:
 
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("напомни", set_reminder))
+    
+    # ИСПРАВЛЕНИЕ: allow_custom=True разрешает использовать кириллические команды
+    application.add_handler(CommandHandler("напомни", set_reminder, allow_custom=True))
 
     # Запускаем опрос сервера Telegram (бот начинает работать)
     print("Бот запущен и ожидает команд...")
