@@ -17,18 +17,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# --- 2. Функция отправки 4-х напоминаний ---
+# --- 2. Функция отправки 4-х напоминаний (используется Job) ---
 
-async def send_reminder_4_times(context: ContextTypes.DEFAULT_TYPE, chat_id: int, task_text: str):
-    """Отправляет сообщение-напоминание 4 раза с интервалом в 1 минуту."""
+async def send_reminder_4_times(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Функция-обработчик JobQueue, которая отправляет сообщение 4 раза.
+    Данные (chat_id, task_text) извлекаются из context.job.data.
+    """
+    job_data = context.job.data
+    chat_id = job_data['chat_id']
+    task_text = job_data['task_text']
     
     logger.info(f"Начинается отправка 4 напоминаний для чата {chat_id}: {task_text}")
     
     for i in range(1, 5):
         # Отправляем сообщение с номером попытки
         message = f"🔔 НАПОМИНАНИЕ (Попытка {i}/4):\n{task_text}"
-        await context.bot.send_message(chat_id=chat_id, text=message)
-        logger.info(f"Отправлено напоминание {i}/4.")
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=message)
+            logger.info(f"Отправлено напоминание {i}/4.")
+        except Exception as e:
+            logger.error(f"Не удалось отправить напоминание {i}/4 в чат {chat_id}: {e}")
+            break # Прерываем, если не удалось отправить
         
         # Ждем 60 секунд (1 минута) перед следующей отправкой, если это не последнее сообщение
         if i < 4:
@@ -68,15 +78,15 @@ async def set_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if target_time <= now:
             target_time += timedelta(days=1)
 
-        delay = target_time - now
+        delay_seconds = (target_time - now).total_seconds()
         
-        # 4. Планируем задачу
+        # 4. Планируем задачу с помощью JobQueue.run_once()
         
-        # Запускаем асинхронную функцию через заданное время (delay.total_seconds())
-        # create_task планирует выполнение send_reminder_4_times через calculated delay
-        context.application.create_task(
-            send_reminder_4_times(context, chat_id, task_text), 
-            context=delay.total_seconds()
+        context.job_queue.run_once(
+            send_reminder_4_times, 
+            delay_seconds, 
+            data={'chat_id': chat_id, 'task_text': task_text},
+            name=f"reminder_{chat_id}_{target_time.timestamp()}"
         )
         
         
@@ -111,13 +121,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     """Запускает бота."""
-    # Создаем Application
-    application = Application.builder().token(TOKEN).build()
-
+    # Создаем Application и включаем JobQueue
+    application = Application.builder().token(TOKEN).concurrent_updates(True).build()
+    
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start))
-    
-    # ИСПРАВЛЕНИЕ: Используем стандартную латинскую команду 'remind' для совместимости
     application.add_handler(CommandHandler("remind", set_reminder))
 
     # Запускаем опрос сервера Telegram (бот начинает работать)
