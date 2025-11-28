@@ -9,7 +9,7 @@ logging.basicConfig(
 )
 
 # Ваш токен от BotFather
-API_TOKEN = '7971014285:AAGe6IbdI7_dLHsn3UdGBER-wZRKK-buSys'
+API_TOKEN = '8274678821:AAH6O2nIfx3YePoDhl2DrLqjSoPIBRETh9Q'
 
 # ID администратора (узнать можно, написав боту /start, а затем посмотрев логи)
 ADMIN_CHAT_ID = 8191068380
@@ -120,3 +120,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
