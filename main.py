@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Загрузка переменных окружения
 load_dotenv()
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-BASE_URL= os.getenv("BASE_URL")
+TELEGRAM_BOT_TOKEN = os.getenv("7971014285:AAFIqR_WR_w8GeK1ErOgXYK8EIcHWYhC4pI")
+DEEPSEEK_API_KEY = os.getenv("sk-c7de6f151629444a8a85020bea2f04d6")
+BASE_URL= os.getenv("https://api.deepseek.com")
 
 if not TELEGRAM_BOT_TOKEN or not DEEPSEEK_API_KEY:
     raise ValueError("Не установлены обязательные переменные окружения: TELEGRAM_BOT_TOKEN или DEEPSEEK_API_KEY")
@@ -253,4 +253,5 @@ def main():
     application.run_polling()
 
 if __name__ == '__main__':
+
     main()
