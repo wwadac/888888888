@@ -13,8 +13,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация (замени на свои значения!)
-BOT_TOKEN = "7971014285:AAFIqR_WR_w8GeK1ErOgXYK8EIcHWYhC4pI"
-DEEPSEEK_API_KEY = "sk-c7de6f151629444a8a85020bea2f04d6"
+DEEPSEEK_API_KEY = "3c57df8805ab5de5a23a032ed39b9af9"  # Получи на platform.deepseek.com
+TELEGRAM_BOT_TOKEN = "7971014285:AAFIqR_WR_w8GeK1ErOgXYK8EIcHWYhC4pI"  # Получи у @BotFather
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 class DeepSeekBot:
@@ -133,3 +133,4 @@ if __name__ == "__main__":
     
     bot = DeepSeekBot()
     bot.run()
+
