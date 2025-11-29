@@ -9,7 +9,7 @@ logging.basicConfig(
 )
 
 # Токен бота (замени на свой)
-BOT_TOKEN = "8274678821:AAH6O2nIfx3YePoDhl2DrLqjSoPIBRETh9Q"
+BOT_TOKEN = "7971014285:AAFIqR_WR_w8GeK1ErOgXYK8EIcHWYhC4pI"
 
 # Словарь для хранения счетчиков по пользователям
 stepfather_count = {}
@@ -70,3 +70,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
