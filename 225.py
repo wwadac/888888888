@@ -31,14 +31,23 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if count == 1:
         message = f"🎤 {username}, у тебя 1 отчим!"
     elif 2 <= count <= 4:
-        message = f"🎤 {username}, у тебя {count} отчима!"
+        message = f"¯\_(ツ)_/¯ {username}, у тебя {count} отчима!"
     else:
-        message = f"🎤 {username}, у тебя {count} отчимов!"
+        message = f"¯\_(ツ)_/¯ {username}, у тебя {count} отчимов!"
     
     await update.message.reply_text(message)
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.lower()
+    text = update.message.text.lower().strip()
+    
+    # Ответы на определенные слова
+    if text == 'да':
+        await update.message.reply_text("пизда")
+        return
+    
+    if text == 'привет':
+        await update.message.reply_text("сладкий")
+        return
     
     # Если в тексте есть упоминание об отчимах
     if any(word in text for word in ['отчим', 'stepfather', 'сколько отчимов']):
@@ -70,4 +79,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
