@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Конфигурация (замени на свои значения!)
 DEEPSEEK_API_KEY = "sk-c7de6f151629444a8a85020bea2f04d6"  # Получи на platform.deepseek.com
 TELEGRAM_BOT_TOKEN = "7971014285:AAFIqR_WR_w8GeK1ErOgXYK8EIcHWYhC4pI"  # Получи у @BotFather
-DEEPSEEK_API_URL = "https://api.deepseek.com"
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
 
 class DeepSeekBot:
     def __init__(self):
@@ -133,6 +133,7 @@ if __name__ == "__main__":
     
     bot = DeepSeekBot()
     bot.run()
+
 
 
 
