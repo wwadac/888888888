@@ -1,9 +1,17 @@
+"""
+СТИКЕР-БОТ ДЛЯ TELEGRAM
+Функция: когда ты пишешь человеку "привет", бот отправляет от твоего лица стикер
+Автор: t.me/fuck_zaza
+"""
+
 import os
 import json
 import asyncio
 import logging
+import random
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
@@ -26,8 +34,11 @@ ADMIN_ID = int(os.getenv('ADMIN_ID'))
 # Файл для хранения данных
 DATA_FILE = 'sticker_bot_data.json'
 
-# Инициализация бота
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+# Инициализация бота для aiogram 3.7+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML")
+)
 dp = Dispatcher(storage=MemoryStorage())
 
 # Состояния FSM
@@ -82,16 +93,10 @@ def is_trigger_message(text):
     
     # Простая проверка по списку
     for phrase in TRIGGER_PHRASES:
-        if phrase in text_lower:
+        if phrase == text_lower:
             return True
-    
-    # Проверка на точное совпадение (без лишних символов)
-    if text_lower in TRIGGER_PHRASES:
-        return True
-    
-    # Проверка на "привет" с разными окончаниями
-    if text_lower.startswith('привет'):
-        return True
+        if phrase in text_lower and len(text_lower) < 50:
+            return True
     
     return False
 
@@ -156,8 +161,7 @@ async def cmd_start(message: types.Message):
         f"2. Пиши людям 'привет' в личных сообщениях\n"
         f"3. Бот автоматически отправит твой стикер\n\n"
         f"<b>Триггерные фразы:</b>\n"
-        f"привет, прив, хай, hello, здравствуй и другие",
-        parse_mode="HTML"
+        f"{', '.join(TRIGGER_PHRASES[:10])}"
     )
 
 @dp.message(Command("setsticker"))
@@ -171,8 +175,7 @@ async def cmd_set_sticker(message: types.Message, state: FSMContext):
     await message.answer(
         "📎 <b>Отправь мне стикер, который я буду использовать</b>\n\n"
         "Просто отправь любой стикер в этот чат, и я сохраню его ID\n"
-        "После этого буду отправлять его от твоего лица когда ты пишешь 'привет'",
-        parse_mode="HTML"
+        "После этого буду отправлять его от твоего лица когда ты пишешь 'привет'"
     )
 
 @dp.message(Command("stats"))
@@ -198,8 +201,7 @@ async def cmd_stats(message: types.Message):
         f"⏰ <b>Последняя отправка:</b> {data.get('last_used', 'никогда')}\n"
         f"👤 <b>Владелец:</b> {ADMIN_ID}\n\n"
         f"<b>Триггерные фразы:</b>\n"
-        f"{', '.join(TRIGGER_PHRASES[:8])}...",
-        parse_mode="HTML"
+        f"{', '.join(TRIGGER_PHRASES[:8])}..."
     )
 
 @dp.message(Command("test"))
@@ -248,8 +250,7 @@ async def process_sticker_input(message: types.Message, state: FSMContext):
         f"<b>Emoji:</b> {sticker.emoji or 'нет'}\n"
         f"<b>Набор:</b> {sticker.set_name or 'нет'}\n\n"
         f"Теперь когда ты пишешь 'привет' в личных сообщениях,\n"
-        f"я буду отправлять этот стикер от твоего лица!",
-        parse_mode="HTML"
+        f"я буду отправлять этот стикер от твоего лица!"
     )
 
 # ==================== ОСНОВНАЯ ЛОГИКА ====================
@@ -261,10 +262,6 @@ async def handle_private_message(message: types.Message):
     Проверяет, пишешь ли ты 'привет' кому-то
     """
     try:
-        # Пропускаем сообщения от самого бота
-        if message.from_user.id == bot.id:
-            return
-        
         # Только сообщения ОТ владельца (тебя)
         if message.from_user.id != ADMIN_ID:
             return
@@ -305,8 +302,7 @@ async def handle_sticker_message(message: types.Message):
         # Если стикер уже установлен, просто показываем инфу
         await message.answer(
             f"📎 У тебя уже установлен стикер\n"
-            f"Используй /setsticker для изменения",
-            parse_mode="HTML"
+            f"Используй /setsticker для изменения"
         )
 
 # ==================== BUSINESS API ПОДДЕРЖКА ====================
