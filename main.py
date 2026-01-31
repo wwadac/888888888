@@ -1,4 +1,5 @@
-"
+
+
 import os
 import json
 import asyncio
@@ -55,7 +56,7 @@ def load_data():
     """Загружает сохраненные данные"""
     default_data = {
         'sticker_id': None,
-        'reply_text': None,  # Новый: текст для автоответа
+        'reply_texts': [],  # Новый: список текстов для автоответов
         'owner_id': ADMIN_ID,
         'last_used': None,
         'total_sent': 0,
@@ -67,8 +68,8 @@ def load_data():
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 # Добавляем новые поля если их нет
-                if 'reply_text' not in data:
-                    data['reply_text'] = None
+                if 'reply_texts' not in data:
+                    data['reply_texts'] = []
                 if 'last_reply_time' not in data:
                     data['last_reply_time'] = {}
                 return data
@@ -144,13 +145,15 @@ async def send_sticker_as_user(chat_id, business_connection_id=None):
 
 # Отправка автоответа с имитацией человека
 async def send_auto_reply(chat_id, business_connection_id=None):
-    """Отправляет заданный текст с задержкой, имитацией чтения/печати и кулдауном"""
+    """Отправляет случайный текст из списка с задержкой, имитацией чтения/печати и кулдауном"""
     data = load_data()
-    reply_text = data.get('reply_text')
+    reply_texts = data.get('reply_texts', [])
     
-    if not reply_text:
-        logger.warning("Текст автоответа не установлен")
+    if not reply_texts:
+        logger.warning("Тексты автоответов не установлены")
         return False
+    
+    reply_text = random.choice(reply_texts)
     
     current_time = datetime.now()
     last_reply = data['last_reply_time'].get(str(chat_id))
@@ -218,14 +221,17 @@ async def cmd_start(message: types.Message):
     
     data = load_data()
     sticker_status = "✅ Установлен" if data.get('sticker_id') else "❌ Не установлен"
-    reply_text_status = "✅ Установлен" if data.get('reply_text') else "❌ Не установлен"
+    replies_count = len(data.get('reply_texts', []))
+    replies_status = f"✅ {replies_count} шт." if replies_count > 0 else "❌ Не установлены"
     total_sent = data.get('total_sent', 0)
     last_used = data.get('last_used', 'никогда')
     
     # Inline кнопки для меню
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Установить стикер", callback_data="set_sticker")],
-        [InlineKeyboardButton(text="Установить автоответ", callback_data="set_reply_text")],
+        [InlineKeyboardButton(text="Добавить автоответ", callback_data="add_reply_text")],
+        [InlineKeyboardButton(text="Список автоответов", callback_data="list_replies")],
+        [InlineKeyboardButton(text="Очистить автоответы", callback_data="clear_replies")],
         [InlineKeyboardButton(text="Статистика", callback_data="show_stats")],
         [InlineKeyboardButton(text="Тест", callback_data="test_bot")]
     ])
@@ -233,13 +239,13 @@ async def cmd_start(message: types.Message):
     await message.answer(
         f"👋 Стикер-бот запущен\n\n"
         f"📊 Статус стикера: {sticker_status}\n"
-        f"📊 Статус автоответа: {reply_text_status}\n"
+        f"📊 Автоответы: {replies_status}\n"
         f"📨 Отправлено всего: {total_sent}\n"
         f"⏰ Последняя отправка: {last_used}\n\n"
         f"Как использовать:\n"
-        f"1. Установи стикер и текст автоответа\n"
+        f"1. Установи стикер и добавь тексты автоответов\n"
         f"2. Пиши 'привет' - бот отправит стикер\n"
-        f"3. Когда пользователь ответит - бот отправит текст с задержкой\n\n"
+        f"3. Когда пользователь ответит - бот отправит случайный текст с задержкой\n\n"
         f"Триггерные фразы:\n"
         f"{', '.join(TRIGGER_PHRASES[:10])}",
         reply_markup=keyboard
@@ -255,15 +261,38 @@ async def cb_set_sticker(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@dp.callback_query(F.data == "set_reply_text")
-async def cb_set_reply_text(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "add_reply_text")
+async def cb_add_reply_text(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         return
     await state.set_state(StickerStates.waiting_for_reply_text)
     await callback.message.answer(
-        "✍️ Отправь текст для автоответа\n\n"
-        "Этот текст будет отправлен после ответа пользователя на твои сообщения"
+        "✍️ Отправь текст для добавления в автоответы\n\n"
+        "Этот текст будет добавлен в список. Бот выберет случайный при отправке"
     )
+    await callback.answer()
+
+@dp.callback_query(F.data == "list_replies")
+async def cb_list_replies(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    data = load_data()
+    reply_texts = data.get('reply_texts', [])
+    if not reply_texts:
+        await callback.message.answer("❌ Нет автоответов")
+    else:
+        replies_list = "\n".join([f"{i+1}. {text[:50]}..." for i, text in enumerate(reply_texts)])
+        await callback.message.answer(f"📝 Список автоответов:\n{replies_list}\n\nИспользуй /removereply <номер> для удаления")
+    await callback.answer()
+
+@dp.callback_query(F.data == "clear_replies")
+async def cb_clear_replies(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    data = load_data()
+    data['reply_texts'] = []
+    save_data(data)
+    await callback.message.answer("✅ Все автоответы очищены")
     await callback.answer()
 
 @dp.callback_query(F.data == "show_stats")
@@ -294,19 +323,63 @@ async def cmd_set_sticker(message: types.Message, state: FSMContext):
         "После этого буду отправлять его от твоего лица когда ты пишешь 'привет'"
     )
 
-@dp.message(Command("setreplytext"))
-async def cmd_set_reply_text(message: types.Message, state: FSMContext):
-    """Команда для установки текста автоответа"""
+@dp.message(Command("addreplytext"))
+async def cmd_add_reply_text(message: types.Message, state: FSMContext):
+    """Команда для добавления текста автоответа"""
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ Доступ запрещен")
         return
     
     await state.set_state(StickerStates.waiting_for_reply_text)
     await message.answer(
-        "✍️ Отправь текст для автоответа\n\n"
-        "Этот текст будет отправлен после ответа пользователя на твои сообщения\n"
+        "✍️ Отправь текст для добавления в автоответы\n\n"
+        "Этот текст будет добавлен в список. Бот выберет случайный при отправке\n"
         "С кулдауном 10-30 сек + рандом, имитацией печати и чтения"
     )
+
+@dp.message(Command("listreplies"))
+async def cmd_list_replies(message: types.Message):
+    """Список автоответов"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    data = load_data()
+    reply_texts = data.get('reply_texts', [])
+    if not reply_texts:
+        await message.answer("❌ Нет автоответов")
+    else:
+        replies_list = "\n".join([f"{i+1}. {text[:50]}..." for i, text in enumerate(reply_texts)])
+        await message.answer(f"📝 Список автоответов:\n{replies_list}\n\nИспользуй /removereply <номер> для удаления")
+
+@dp.message(Command("removereply"))
+async def cmd_remove_reply(message: types.Message):
+    """Удаление автоответа по номеру"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        index = int(message.text.split()[1]) - 1
+        data = load_data()
+        reply_texts = data.get('reply_texts', [])
+        if 0 <= index < len(reply_texts):
+            removed = reply_texts.pop(index)
+            save_data(data)
+            await message.answer(f"✅ Удален: {removed[:50]}...")
+        else:
+            await message.answer("❌ Неверный номер")
+    except:
+        await message.answer("❌ Использование: /removereply <номер>")
+
+@dp.message(Command("clearreplies"))
+async def cmd_clear_replies(message: types.Message):
+    """Очистка всех автоответов"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    data = load_data()
+    data['reply_texts'] = []
+    save_data(data)
+    await message.answer("✅ Все автоответы очищены")
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
@@ -316,7 +389,9 @@ async def cmd_stats(message: types.Message):
     
     data = load_data()
     sticker_id = data.get('sticker_id', 'не установлен')
-    reply_text = data.get('reply_text', 'не установлен')
+    reply_texts = data.get('reply_texts', [])
+    replies_count = len(reply_texts)
+    replies_preview = ", ".join([text[:20] + "..." for text in reply_texts[:3]]) if reply_texts else "нет"
     
     if sticker_id != 'не установлен':
         try:
@@ -328,7 +403,7 @@ async def cmd_stats(message: types.Message):
     await message.answer(
         f"📊 Статистика бота\n\n"
         f"🆔 ID стикера:\n{sticker_id[:50]}...\n"
-        f"📝 Текст автоответа:\n{reply_text[:50]}...\n"
+        f"📝 Автоответы: {replies_count} шт. ({replies_preview})\n"
         f"📨 Всего отправлено: {data.get('total_sent', 0)}\n"
         f"⏰ Последняя отправка: {data.get('last_used', 'никогда')}\n"
         f"👤 Владелец: {ADMIN_ID}\n\n"
@@ -343,15 +418,15 @@ async def cmd_test(message: types.Message):
         return
     
     data = load_data()
-    if not data.get('sticker_id') and not data.get('reply_text'):
-        await message.answer("❌ Ничего не установлено. Используй /setsticker или /setreplytext")
+    if not data.get('sticker_id') and not data.get('reply_texts'):
+        await message.answer("❌ Ничего не установлено. Используй /setsticker или /addreplytext")
         return
     
     try:
         await message.answer("🔄 Тестовая отправка...")
         if data.get('sticker_id'):
             await send_sticker_as_user(message.chat.id)
-        if data.get('reply_text'):
+        if data.get('reply_texts'):
             await send_auto_reply(message.chat.id)
         await message.answer("✅ Тест выполнен успешно!")
     except Exception as e:
@@ -401,7 +476,7 @@ async def process_reply_text_input(message: types.Message, state: FSMContext):
     
     # Сохраняем данные
     data = load_data()
-    data['reply_text'] = reply_text
+    data['reply_texts'].append(reply_text)
     data['set_by'] = message.from_user.id
     data['set_at'] = datetime.now().isoformat()
     save_data(data)
@@ -409,10 +484,11 @@ async def process_reply_text_input(message: types.Message, state: FSMContext):
     await state.clear()
     
     await message.answer(
-        f"✅ Текст автоответа сохранен!\n\n"
+        f"✅ Текст добавлен в автоответы!\n\n"
         f"Текст: {reply_text}\n\n"
         f"Теперь после ответа пользователя на твои сообщения,\n"
-        f"я буду отправлять этот текст с имитацией человека (задержка, typing)"
+        f"я буду отправлять случайный текст из списка с имитацией человека (задержка, typing)\n"
+        f"Текущий список: {len(data['reply_texts'])} шт."
     )
 
 # ==================== ОСНОВНАЯ ЛОГИКА ====================
@@ -531,7 +607,7 @@ async def main():
     """Запуск бота"""
     print("=" * 50)
     print("🤖 СТИКЕР-БОТ ДЛЯ TELEGRAM")
-    print("Функция: автоматическая отправка стикера на 'привет' + автоответ на ответы пользователей")
+    print("Функция: автоматическая отправка стикера на 'привет' + случайный автоответ на ответы пользователей")
     print(f"👤 Владелец: {ADMIN_ID}")
     print("=" * 50)
     
@@ -541,10 +617,11 @@ async def main():
         print(f"✅ Стикер установлен (отправлено: {data.get('total_sent', 0)})")
     else:
         print("⚠️ Стикер не установлен. Используй /setsticker")
-    if data.get('reply_text'):
-        print(f"✅ Автоответ установлен")
+    replies_count = len(data.get('reply_texts', []))
+    if replies_count > 0:
+        print(f"✅ Автоответы: {replies_count} шт.")
     else:
-        print("⚠️ Автоответ не установлен. Используй /setreplytext")
+        print("⚠️ Автоответы не установлены. Используй /addreplytext")
     
     print("🔄 Бот запущен и слушает сообщения...")
     print("📝 Триггерные фразы:", ", ".join(TRIGGER_PHRASES[:5]) + "...")
@@ -554,7 +631,10 @@ async def main():
     await bot.set_my_commands([
         types.BotCommand(command="start", description="Запустить бота"),
         types.BotCommand(command="setsticker", description="Установить стикер"),
-        types.BotCommand(command="setreplytext", description="Установить текст автоответа"),
+        types.BotCommand(command="addreplytext", description="Добавить текст автоответа"),
+        types.BotCommand(command="listreplies", description="Список автоответов"),
+        types.BotCommand(command="removereply", description="Удалить автоответ"),
+        types.BotCommand(command="clearreplies", description="Очистить автоответы"),
         types.BotCommand(command="stats", description="Статистика"),
         types.BotCommand(command="test", description="Тест стикера и автоответа")
     ])
